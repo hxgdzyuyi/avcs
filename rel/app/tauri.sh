@@ -53,6 +53,12 @@ main() {
     exit 1
   fi
 
+  if [ "${#tauri_args[@]}" -gt 0 ]; then
+    set -- "${tauri_args[@]}"
+  else
+    set --
+  fi
+
   release_root="$root_dir/src-tauri/rel-darwin"
   config_json='{"bundle":{"resources":{"rel-darwin":"rel"}}}'
 
@@ -63,15 +69,15 @@ main() {
   case "$command" in
     build)
       build_release
-      run_tauri_build "$config_json" "${tauri_args[@]}"
+      run_tauri_build "$config_json" "$@"
       ;;
     app)
       build_release
-      run_tauri_build "$config_json" "${tauri_args[@]}"
+      run_tauri_build "$config_json" "$@"
       open_app
       ;;
     *)
-      cargo tauri "$command" "${tauri_args[@]}"
+      cargo tauri "$command" "$@"
       ;;
   esac
 }
