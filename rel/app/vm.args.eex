@@ -1,0 +1,2 @@
+# Keep the desktop release local and lightweight.
++sbwt none +sbwtdcpu none +sbwtdio none +Q 65536

@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SESSION_NAME="${TMUX_SESSION_NAME:-avcs-dev}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PHX_PORT="${PHX_PORT:-9500}"
+VITE_PORT="${VITE_PORT:-9501}"
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "tmux is not installed." >&2
+  exit 1
+fi
+
+if ! tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
+  tmux new-session -d -s "${SESSION_NAME}" -n dev -c "${ROOT_DIR}"
+  tmux send-keys -t "${SESSION_NAME}:dev.0" "cd \"${ROOT_DIR}/web\" && PHX_PORT=${PHX_PORT} VITE_PORT=${VITE_PORT} npm run dev -- --host 127.0.0.1 --port ${VITE_PORT}" C-m
+  tmux split-window -h -t "${SESSION_NAME}:dev.0" -c "${ROOT_DIR}"
+  tmux send-keys -t "${SESSION_NAME}:dev.1" "cd \"${ROOT_DIR}\" && PORT=${PHX_PORT} PHX_PORT=${PHX_PORT} VITE_PORT=${VITE_PORT} mix phx.server" C-m
+  tmux select-pane -t "${SESSION_NAME}:dev.0"
+fi
+
+if [ -n "${TMUX:-}" ]; then
+  tmux switch-client -t "${SESSION_NAME}"
+else
+  tmux attach-session -t "${SESSION_NAME}"
+fi

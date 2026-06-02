@@ -1,0 +1,273 @@
+@use "tokens" as *;
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: $font-sans;
+  color: $ink;
+  background: $panel;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.mobile-tabs {
+  display: none;
+}
+
+.project-pane,
+.chat-pane,
+.board-pane {
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid $line;
+  background: $surface;
+}
+
+.project-pane,
+.chat-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-pane {
+  width: 240px;
+  min-width: 220px;
+  max-width: 280px;
+}
+
+.workbench {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: $surface;
+}
+
+.workbench-body {
+  display: grid;
+  grid-template-columns: 456px minmax(640px, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.chat-pane {
+  width: 456px;
+  min-width: 380px;
+  max-width: 520px;
+}
+
+.board-pane {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-width: 640px;
+  border-right: 0;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 60px;
+  padding: 16px;
+  border-bottom: 1px solid $soft-line;
+}
+
+.pane-header > div:first-child {
+  min-width: 0;
+}
+
+.pane-header h1,
+.pane-header h2 {
+  margin: 2px 0 0;
+  font-size: 18px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.tracing-page {
+  display: grid;
+  grid-template-rows: 60px minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: $workspace;
+}
+
+.tracing-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 0 16px;
+  border-bottom: 1px solid $soft-line;
+  background: $surface;
+}
+
+.tracing-shell {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+
+.tracing-tree-pane,
+.tracing-detail-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tracing-tree-pane {
+  border-right: 1px solid $line;
+  background: $surface;
+}
+
+.tracing-detail-pane {
+  background: $workspace;
+}
+
+.eyebrow {
+  color: $muted;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+@media (max-width: 1080px) {
+  .app-shell {
+    grid-template-columns: 240px minmax(380px, 1fr);
+  }
+
+  .workbench-body {
+    grid-template-columns: minmax(380px, 1fr);
+  }
+
+  .chat-pane {
+    width: auto;
+    max-width: none;
+  }
+
+  .board-pane {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .mobile-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    height: 44px;
+    padding: 6px;
+    border-bottom: 1px solid $soft-line;
+    background: $surface;
+  }
+
+  .mobile-tabs button {
+    min-width: 0;
+    border: 0;
+    border-radius: 999px;
+    color: $muted;
+    background: transparent;
+    font-size: 13px;
+  }
+
+  .mobile-tabs button.active {
+    color: $ink;
+    background: $panel;
+  }
+
+  .app-shell {
+    display: block;
+    height: calc(100vh - 44px);
+  }
+
+  .project-pane,
+  .workbench,
+  .workbench-body,
+  .chat-pane,
+  .board-pane {
+    width: 100%;
+    height: 100%;
+  }
+
+  .workbench {
+    display: block;
+  }
+
+  .workbench-body {
+    display: block;
+  }
+
+  .app-shell > .project-pane,
+  .app-shell > .workbench {
+    display: none;
+  }
+
+  .app-shell[data-mobile-view="project"] > .project-pane {
+    display: flex;
+  }
+
+  .app-shell[data-mobile-view="thread"] > .workbench,
+  .app-shell[data-mobile-view="board"] > .workbench {
+    display: block;
+  }
+
+  .app-shell[data-mobile-view="thread"] .chat-pane {
+    display: flex;
+  }
+
+  .app-shell[data-mobile-view="thread"] .board-pane {
+    display: none;
+  }
+
+  .app-shell[data-mobile-view="board"] .chat-pane {
+    display: none;
+  }
+
+  .app-shell[data-mobile-view="board"] .board-pane {
+    display: grid;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 860px) {
+  .tracing-shell {
+    grid-template-columns: minmax(220px, 34vw) minmax(0, 1fr);
+  }
+}

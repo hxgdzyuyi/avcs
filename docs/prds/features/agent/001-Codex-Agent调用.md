@@ -1,0 +1,98 @@
+# 006 Codex Agent 调用
+
+状态：Draft  
+领域：`lib/avcs/agent`
+
+## 1. 目标
+
+Avcs 通过 `codex app-server` 调用 Codex Agent 能力，不在 Avcs 内部实现独立大模型服务、工具协议或复杂 Agent 编排。
+
+## 2. 调用方式
+
+MVP 默认启动命令：
+
+```bash
+codex app-server
+```
+
+该命令默认使用 `stdio://`，通过 stdin/stdout 传输 newline-delimited JSON，也就是 JSONL。消息遵循 JSON-RPC 2.0 形态，但 wire format 省略 `"jsonrpc": "2.0"` 字段。
+
+参考文档：
+
+1. Codex App Server
+2. Codex CLI reference 中的 `codex app-server`
+
+## 3. 协议流程
+
+后端需要按 Codex app-server 官方协议完成：
+
+1. 启动并持有 `codex app-server` 进程。
+2. 连接建立后先发送 `initialize` 请求。
+3. 随后发送 `initialized` 通知。
+4. 使用 `thread/start` 创建 Codex 会话。
+5. 需要继续同一 Codex 会话时使用 `thread/resume`。
+6. 用户发送消息时，通过 `turn/start` 传入 `threadId`、用户文本、聊天输入区当前引用的图片路径、当前项目 `cwd` 和必要运行设置。
+7. 持续读取 `thread/*`、`turn/*`、`item/*`、工具进度和错误通知。
+8. 将 Codex 输出转换为 Avcs 自己的 turn/item/asset 记录。
+
+## 4. 行为约束
+
+1. Agent 不主动追问用户缺失信息。
+2. 信息不足时，Agent 应使用合理默认值继续完成任务，并在输出中简短说明假设。
+3. Agent 不做跨项目长期记忆。
+4. Agent 只接收当前 thread、用户输入、聊天输入区当前引用的资产和必要项目元信息。
+5. 图片生成必须真实接入 Codex built-in `image_gen`；MVP 不用 mock/stub 替代图片生成。
+6. Avcs 通过系统提示词限制图片生成风格、输出路径、命名规则和结果回传格式，要求 Agent 将生成图片保存到或回传到当前项目 `output/` 目录可捕获的位置。
+
+## 5. 事件映射
+
+Codex app-server 输出需要映射到 Avcs：
+
+1. `thread/*` 映射到 thread 状态。
+2. `turn/*` 映射到 turn 生命周期。
+3. `item/*` 映射到用户消息、Assistant 消息、工具调用、工具结果、图片资产和错误。
+4. 工具进度映射到聊天区工具状态行。
+5. 错误通知映射到当前 turn 的 error item 和前端 error 事件。
+
+## 6. 兼容性
+
+Codex app-server 当前属于实验性接口。Avcs 实现应显式记录兼容的 Codex CLI 版本，并在升级 Codex 时重新验证 JSON Schema 与事件映射。
+
+Avcs 将 Codex app-server JSON Schema 作为 Elixir 后端协议契约提交到仓库：
+
+```bash
+codex app-server generate-json-schema --out priv/codex_app_server/schemas
+```
+
+`priv/codex_app_server/schema_manifest.json` 记录 `codex_version`、`schema_command`、`schema_draft` 和 `generated_at`。升级 Codex CLI 后必须重新生成 schema，检查 `priv/codex_app_server/schemas` 和 manifest 的 diff，并更新后端事件映射测试。
+
+Schema 只用于 Elixir 后端开发期和测试期协议校验，不暴露给 React，不意味着 Avcs 前端可以直接调用 Codex app-server，也不意味着前端可以引入 TypeScript。
+
+校验策略：
+
+1. 单元测试中关键 request / response / notification 必须通过 JSON Schema。
+2. dev / test 运行时校验关键消息，失败记录 warning 后继续使用兼容解析。
+3. prod 默认不运行 schema 校验，避免 Codex 协议漂移直接中断用户流程。
+
+## 7. 错误处理
+
+需要覆盖：
+
+1. app-server 启动失败。
+2. initialize 失败。
+3. stdio JSONL 解析失败。
+4. `thread/start` 或 `thread/resume` 失败。
+5. `turn/start` 失败。
+6. Agent 运行中断。
+7. 工具调用失败。
+
+错误应写入当前 turn/item，并通过 WebSocket 推送给前端。
+
+## 8. 验收标准
+
+1. 后端可以启动并持有 `codex app-server` 进程。
+2. 后端能完成 initialize / initialized 流程。
+3. 后端能通过 `thread/start` 或 `thread/resume` 管理 Codex 会话。
+4. 用户发送消息时，后端能通过 `turn/start` 传入文本、图片引用、项目 `cwd` 和必要设置。
+5. Agent 输出能写回项目 SQLite 的 turn/item。
+6. Avcs 不在内部实现独立大模型服务或自定义工具协议。

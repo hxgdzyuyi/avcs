@@ -1,0 +1,6 @@
+{
+  "codex_version": "codex-cli 0.130.0",
+  "schema_command": "codex app-server generate-json-schema --out priv/codex_app_server/schemas",
+  "schema_draft": "draft-07",
+  "generated_at": "2026-06-01T10:02:32Z"
+}

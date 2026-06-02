@@ -1,0 +1,74 @@
+name: Desktop macOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build macOS Apple Silicon app
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Read versions
+        shell: bash
+        run: |
+          . versions
+          echo "elixir=$elixir" >> "$GITHUB_ENV"
+          echo "otp=$otp" >> "$GITHUB_ENV"
+          echo "node=$node" >> "$GITHUB_ENV"
+
+      - name: Setup Elixir and OTP
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.otp }}
+          elixir-version: ${{ env.elixir }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.node }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rel/app/src-tauri
+          cache-directories: |
+            ~/.cargo/bin
+          key: aarch64-apple-darwin
+
+      - name: Install Tauri CLI
+        shell: bash
+        run: |
+          if ! command -v cargo-tauri > /dev/null 2>&1; then
+            cargo install tauri-cli --version "=2.8.0" --locked
+          else
+            cargo-tauri --version
+          fi
+
+      - name: Build app
+        shell: bash
+        run: rel/app/tauri.sh build --target aarch64-apple-darwin
+
+      - name: Zip app bundle
+        shell: bash
+        run: |
+          ditto -c -k --keepParent \
+            rel/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Avcs.app \
+            Avcs-macos-aarch64.app.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Avcs-macos-aarch64.app
+          path: Avcs-macos-aarch64.app.zip
+          if-no-files-found: error
