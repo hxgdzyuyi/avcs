@@ -81,6 +81,7 @@ export default function App() {
   const messageRequestSeqRef = useRef(0);
   const runningTurnsRef = useRef({});
   const isProjectRouteSyncRef = useRef(false);
+  const linkedProjectOpenRef = useRef(false);
   const pendingReferencePreviewsRef = useRef(new Map());
   const settingsBackPathRef = useRef(null);
 
@@ -250,6 +251,63 @@ export default function App() {
     const data = await channel.push("projects:list");
     setProjects(data.items || []);
   }, [channel]);
+
+  useEffect(() => {
+    if (!channel || linkedProjectOpenRef.current) return undefined;
+
+    const linkedProjectPath = new URLSearchParams(window.location.search).get(
+      "project_path",
+    );
+    if (!linkedProjectPath) return undefined;
+
+    linkedProjectOpenRef.current = true;
+    let cancelled = false;
+
+    async function openLinkedProject() {
+      setNotice("");
+      setDraftProjectId(null);
+      setPrompt("");
+      setReferences([]);
+      clearPendingReferences();
+
+      try {
+        const opened = await openProject(linkedProjectPath);
+        if (cancelled) return;
+
+        setProject(opened);
+        setProjectPath(opened.folder_path || linkedProjectPath);
+        setProjects((current) => mergeById([opened, ...current]));
+        setSelectedBoardIds([]);
+        if (opened.id) {
+          setExpandedProjectIds((current) =>
+            current.includes(opened.id) ? current : [opened.id, ...current],
+          );
+        }
+
+        await refreshProjects();
+        const selectedThreadId = await refreshAll(
+          opened.current_thread_id,
+          opened,
+        );
+        if (cancelled || !opened.id) return;
+
+        const targetPath = buildProjectWorkspacePath(
+          opened.id,
+          selectedThreadId,
+        );
+        window.history.replaceState({}, "", targetPath);
+        setRoutePath(window.location.pathname);
+      } catch (error) {
+        if (!cancelled) setNotice(error.message);
+      }
+    }
+
+    openLinkedProject();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [channel, refreshAll, refreshProjects]);
 
   const loadProjectThreads = useCallback(
     async (projectId) => {
@@ -1303,9 +1361,13 @@ export default function App() {
     setRepairingThreads((current) => ({ ...current, [repairThreadId]: true }));
 
     try {
-      const data = await channel.push("thread:repair", {
-        thread_id: repairThreadId,
-      }, 30_000);
+      const data = await channel.push(
+        "thread:repair",
+        {
+          thread_id: repairThreadId,
+        },
+        30_000,
+      );
       const nextThreads = data.threads || [];
       const nextAssets = data.assets || [];
       const nextBoardItems = data.board_items || [];
@@ -1550,7 +1612,9 @@ export default function App() {
         if (data.items?.length) {
           setBoardItems((current) =>
             current.map((item) => {
-              const updated = data.items.find((candidate) => candidate.id === item.id);
+              const updated = data.items.find(
+                (candidate) => candidate.id === item.id,
+              );
               return updated || item;
             }),
           );
@@ -1657,7 +1721,8 @@ export default function App() {
 
   function currentWorkspacePath() {
     if (!project?.id) return "/web";
-    const threadId = draftThreadProjectId === project.id ? null : currentThreadId;
+    const threadId =
+      draftThreadProjectId === project.id ? null : currentThreadId;
     return buildProjectWorkspacePath(project.id, threadId);
   }
 
@@ -1673,7 +1738,12 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!project?.id || tracingThreadId || settingsRoute || isProjectRouteSyncRef.current)
+    if (
+      !project?.id ||
+      tracingThreadId ||
+      settingsRoute ||
+      isProjectRouteSyncRef.current
+    )
       return;
 
     syncProjectWorkspaceRoute(

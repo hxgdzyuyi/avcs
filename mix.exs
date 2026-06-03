@@ -9,7 +9,7 @@ defmodule Avcs.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
-      deps: deps(),
+      deps: target_deps(Mix.target()) ++ deps(),
       releases: releases(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -53,6 +53,9 @@ defmodule Avcs.MixProject do
       {:bandit, "~> 1.5"}
     ]
   end
+
+  defp target_deps(:app), do: [{:elixirkit, github: "livebook-dev/elixirkit"}]
+  defp target_deps(_target), do: []
 
   defp releases do
     [

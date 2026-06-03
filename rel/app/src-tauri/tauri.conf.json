@@ -21,12 +21,27 @@
       "icons/AppIcon.icns",
       "icons/icon.png"
     ],
+    "fileAssociations": [
+      {
+        "ext": ["avcs"],
+        "name": "Avcs Project",
+        "mimeType": "application/x-avcs-project",
+        "role": "Editor"
+      }
+    ],
     "macOS": {
       "entitlements": "App.entitlements",
       "exceptionDomain": null,
       "frameworks": [],
       "providerShortName": null,
       "signingIdentity": null
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["avcs"]
+      }
     }
   }
 }
