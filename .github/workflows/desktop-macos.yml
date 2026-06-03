@@ -110,10 +110,14 @@ jobs:
           )"
 
           if gh release view "$tag" > /dev/null 2>&1; then
-            gh release edit "$tag" --notes "$notes"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              gh release edit "$tag" --notes "$notes" --draft=false
+            else
+              gh release edit "$tag" --notes "$notes"
+            fi
           else
             if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$notes" --draft
+              gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$notes"
             else
               gh release create "$tag" --title "$tag" --notes "$notes" --draft
             fi
