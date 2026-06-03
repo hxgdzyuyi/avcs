@@ -88,45 +88,6 @@ export default function ProjectPane({
           </IconButton>
           <div className="project-menu-wrap" data-project-menu-root>
             <IconButton
-              label="更多项目操作"
-              className={`ghost ${currentProjectMenuOpen ? "active" : ""}`}
-              disabled={!project}
-              onClick={() => {
-                setCurrentProjectMenuOpen((open) => !open);
-                setProjectMenuOpen(false);
-                setActiveProjectMenuId(null);
-              }}
-            >
-              <MoreHorizontal size={16} />
-            </IconButton>
-            {currentProjectMenuOpen && project ? (
-              <div className="project-menu" role="menu">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCurrentProjectMenuOpen(false);
-                    onArchiveProject(project);
-                  }}
-                >
-                  <Archive size={15} />
-                  <span>归档当前项目</span>
-                </button>
-                <button
-                  className="danger"
-                  type="button"
-                  onClick={() => {
-                    setCurrentProjectMenuOpen(false);
-                    onDeleteProject(project);
-                  }}
-                >
-                  <Trash2 size={15} />
-                  <span>删除引用</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <div className="project-menu-wrap" data-project-menu-root>
-            <IconButton
               label="创建或添加项目"
               className={projectMenuOpen ? "active" : ""}
               onClick={() => {
