@@ -106,6 +106,27 @@ defmodule AvcsWeb.AvcsChannel do
     end)
   end
 
+  def handle_in("threads:archive_all", %{"project_id" => project_id}, socket) do
+    with_project_by_id(project_id, socket, fn project ->
+      {:ok, result} = Avcs.Threads.archive_all_threads(project)
+
+      if current_project?(project) do
+        :ok = Avcs.Session.set_current_thread_id(nil)
+      end
+
+      broadcast_threads(project)
+      Avcs.Projects.broadcast_projects_updated()
+
+      reply_ok(
+        Map.merge(result, %{
+          project_id: project["id"],
+          current_thread_id: Avcs.Session.current_thread_id()
+        }),
+        socket
+      )
+    end)
+  end
+
   def handle_in("thread:create", payload, socket) do
     with_project(socket, fn project ->
       {:ok, thread} = Avcs.Threads.create_thread(project, payload["title"] || "Untitled thread")
@@ -511,6 +532,13 @@ defmodule AvcsWeb.AvcsChannel do
 
       {:error, reason} ->
         reply_error("project_not_found", to_string(reason), socket)
+    end
+  end
+
+  defp current_project?(project) do
+    case Avcs.Projects.current_project() do
+      %{"id" => current_project_id} -> current_project_id == project["id"]
+      _project -> false
     end
   end
 

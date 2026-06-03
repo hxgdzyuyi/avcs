@@ -16,6 +16,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
+  Pencil,
   RotateCcw,
   ZoomIn,
   ZoomOut,
@@ -484,7 +485,6 @@ export default function BoardPane({
         if (!additive && pointerEvent.type === "pointerup") {
           setSelectedIds([item.id]);
           setPrimarySelectedId(item.id);
-          openPreviewDialog(item);
         }
         return;
       }
@@ -679,7 +679,7 @@ export default function BoardPane({
                   />
                 ) : null}
                 {marquee ? <div className="board-marquee" style={rectStyle(marquee)} /> : null}
-                {selectionBounds && selectedItems.length > 1 ? (
+                {selectionBounds ? (
                   <LayoutToolbar
                     bounds={selectionBounds}
                     camera={camera}
@@ -687,6 +687,11 @@ export default function BoardPane({
                     layoutMenu={layoutMenu}
                     setLayoutMenu={setLayoutMenu}
                     onApply={applyLayout}
+                    onEdit={
+                      selectedItems.length === 1 && primarySelectedItem
+                        ? () => openPreviewDialog(primarySelectedItem)
+                        : null
+                    }
                     canTidy={selectedItems.length >= 2}
                   />
                 ) : null}
@@ -883,44 +888,55 @@ function SelectionBounds({ bounds, camera, selectedCount }) {
   );
 }
 
-function LayoutToolbar({ bounds, camera, viewportRef, layoutMenu, setLayoutMenu, onApply, canTidy }) {
-  const position = layoutToolbarPosition(bounds, camera, viewportRef.current);
+function LayoutToolbar({ bounds, camera, viewportRef, layoutMenu, setLayoutMenu, onApply, onEdit, canTidy }) {
+  const compact = Boolean(onEdit && !canTidy);
+  const position = layoutToolbarPosition(bounds, camera, viewportRef.current, { compact });
 
   return (
     <div
-      className="board-layout-toolbar"
+      className={`board-layout-toolbar ${compact ? "compact" : ""}`}
       style={{ left: `${position.left}px`, top: `${position.top}px` }}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      <ToolbarMenu
-        name="align"
-        label="Align"
-        open={layoutMenu === "align"}
-        setLayoutMenu={setLayoutMenu}
-        items={[
-          ["align-left", "Align Left", <AlignStartVertical size={14} />],
-          ["align-center-x", "Horizontal Center", <AlignCenterVertical size={14} />],
-          ["align-right", "Align Right", <AlignEndVertical size={14} />],
-          ["align-top", "Align Top", <AlignStartHorizontal size={14} />],
-          ["align-center-y", "Vertical Center", <AlignCenterHorizontal size={14} />],
-          ["align-bottom", "Align Bottom", <AlignEndHorizontal size={14} />],
-          ["normalize-width", "Normalize Width"],
-          ["normalize-height", "Normalize Height"],
-        ]}
-        onApply={onApply}
-      />
-      <ToolbarMenu
-        name="tidy"
-        label="Tidy"
-        open={layoutMenu === "tidy"}
-        setLayoutMenu={setLayoutMenu}
-        menuClassName="wide"
-        items={[
-          ["tidy-horizontal", "Tidy Horizontal Space", null, !canTidy],
-          ["tidy-vertical", "Tidy Vertical Space", null, !canTidy],
-        ]}
-        onApply={onApply}
-      />
+      {onEdit ? (
+        <button className="board-layout-trigger edit" type="button" onClick={onEdit}>
+          <Pencil size={13} />
+          <span>编辑</span>
+        </button>
+      ) : null}
+      {canTidy ? (
+        <>
+          <ToolbarMenu
+            name="align"
+            label="Align"
+            open={layoutMenu === "align"}
+            setLayoutMenu={setLayoutMenu}
+            items={[
+              ["align-left", "Align Left", <AlignStartVertical size={14} />],
+              ["align-center-x", "Horizontal Center", <AlignCenterVertical size={14} />],
+              ["align-right", "Align Right", <AlignEndVertical size={14} />],
+              ["align-top", "Align Top", <AlignStartHorizontal size={14} />],
+              ["align-center-y", "Vertical Center", <AlignCenterHorizontal size={14} />],
+              ["align-bottom", "Align Bottom", <AlignEndHorizontal size={14} />],
+              ["normalize-width", "Normalize Width"],
+              ["normalize-height", "Normalize Height"],
+            ]}
+            onApply={onApply}
+          />
+          <ToolbarMenu
+            name="tidy"
+            label="Tidy"
+            open={layoutMenu === "tidy"}
+            setLayoutMenu={setLayoutMenu}
+            menuClassName="wide"
+            items={[
+              ["tidy-horizontal", "Tidy Horizontal Space", null, !canTidy],
+              ["tidy-vertical", "Tidy Vertical Space", null, !canTidy],
+            ]}
+            onApply={onApply}
+          />
+        </>
+      ) : null}
     </div>
   );
 }
@@ -1095,7 +1111,7 @@ function mergeIds(current, additions) {
   return merged;
 }
 
-function layoutToolbarPosition(bounds, camera, viewport) {
+function layoutToolbarPosition(bounds, camera, viewport, options = {}) {
   const rect = viewport?.getBoundingClientRect();
   const screenBounds = worldBoundsToScreen(
     {
@@ -1107,7 +1123,20 @@ function layoutToolbarPosition(bounds, camera, viewport) {
     camera,
   );
   const viewportWidth = rect?.width || 800;
-  const left = clamp(screenBounds.left + screenBounds.width / 2 - 130, 12, Math.max(12, viewportWidth - 272));
+  const toolbarWidth = options.compact ? 78 : 272;
+  const centerX = screenBounds.left + screenBounds.width / 2;
+  if (options.compact) {
+    return {
+      left: clamp(centerX, 12, Math.max(12, viewportWidth - 12)),
+      top: Math.max(12, screenBounds.top - 46),
+    };
+  }
+
+  const left = clamp(
+    centerX - toolbarWidth / 2,
+    12,
+    Math.max(12, viewportWidth - toolbarWidth - 12),
+  );
   const top = Math.max(12, screenBounds.top - 46);
   return { left, top };
 }

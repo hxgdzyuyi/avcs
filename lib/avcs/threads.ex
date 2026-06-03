@@ -142,6 +142,43 @@ defmodule Avcs.Threads do
     end)
   end
 
+  def archive_all_threads(project) do
+    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+      now = Avcs.Time.now_iso()
+
+      existing =
+        SQLite.all!(
+          db,
+          "SELECT * FROM threads WHERE archived_at IS NULL ORDER BY updated_at DESC, created_at DESC"
+        )
+
+      SQLite.run!(
+        db,
+        "UPDATE threads SET archived_at = ?, updated_at = ? WHERE archived_at IS NULL",
+        [now, now]
+      )
+
+      Enum.each(existing, fn thread ->
+        Avcs.Trace.append_event(
+          project,
+          %{
+            scope: "thread",
+            event_name: "thread_archived",
+            thread_id: thread["id"],
+            status: thread["status"],
+            payload: %{archived_at: now}
+          },
+          db: db
+        )
+      end)
+
+      %{
+        archived_count: length(existing),
+        archived_thread_ids: Enum.map(existing, & &1["id"])
+      }
+    end)
+  end
+
   def set_codex_thread_id(project, id, codex_thread_id) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
       existing = SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])

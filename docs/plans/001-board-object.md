@@ -26,11 +26,11 @@ plan_state: finished
 
 ## overview
 
-目标是在 Board 的 Output 图片对象上实现点击打开全屏图片预览 dialog，视觉和交互参考 ChatGPT 图片查看效果：顶部轻量栏显示关闭按钮和图片标题，中间居中展示完整图片，底部提供紧凑的“描述编辑”输入。
+目标是在 Board 的 Output 图片对象选中后，通过 `board-layout-toolbar` 的“编辑”按钮打开全屏图片预览 dialog，视觉和交互参考 ChatGPT 图片查看效果：顶部轻量栏显示关闭按钮和图片标题，中间居中展示完整图片，底部提供紧凑的“描述编辑”输入。
 
 边界：
 
-1. 只针对 Output 画板对象点击打开预览；Work tab 素材列表仍保留点击加入引用的现有行为。
+1. 只针对 Output 画板对象选中后的“编辑”操作打开预览；Work tab 素材列表仍保留点击加入引用的现有行为。
 2. 画板主渲染层继续使用普通 HTML DOM，不引入 Canvas/WebGL/SVG。
 3. 预览 dialog 是前端临时 UI 状态，不写入 SQLite。
 4. 图片文件仍通过 Phoenix 预览 API 读取，React 不直接拼接本地路径读取文件。
@@ -39,13 +39,14 @@ plan_state: finished
 
 第一阶段覆盖：
 
-1. 单击 Output 图片对象，打开全屏预览 dialog。
+1. 单击 Output 图片对象只选中该对象，不打开全屏预览 dialog。
 2. 拖动画板对象时只移动对象，不打开 dialog。
 3. Shift/Cmd/Ctrl 追加选择时只更新选区，不打开 dialog。
-4. Dialog 顶部显示关闭按钮和图片文件名。
-5. Dialog 中间用 `img` 等比例完整显示图片，按 viewport 自适应，不裁切。
-6. Dialog 底部显示紧凑描述编辑 composer；发送时把当前预览图片作为本轮唯一图片引用。
-7. Esc、顶部关闭按钮和点击背景空白区都可以关闭 dialog。
+4. 单选后 `board-layout-toolbar` 显示“编辑”按钮，点击后打开全屏预览 dialog。
+5. Dialog 顶部显示关闭按钮和图片文件名。
+6. Dialog 中间用 `img` 等比例完整显示图片，按 viewport 自适应，不裁切。
+7. Dialog 底部显示紧凑描述编辑 composer；发送时把当前预览图片作为本轮唯一图片引用。
+8. Esc、顶部关闭按钮和点击背景空白区都可以关闭 dialog。
 
 ## data_model
 
@@ -103,10 +104,11 @@ onSendImagePrompt(assetId, text)
 
 1. `onPointerDown` 仍用于选择和启动拖拽。
 2. 指针移动距离超过 4px 视为拖拽，只移动对象，不打开预览。
-3. pointer up 时如果没有拖拽且不是 Shift/Cmd/Ctrl 追加选择，则选中该对象并打开预览 dialog。
+3. pointer up 时如果没有拖拽且不是 Shift/Cmd/Ctrl 追加选择，则只选中该对象，不打开预览 dialog。
 4. Shift/Cmd/Ctrl 点击继续追加或取消选择，不打开预览。
-5. Resize handle、layout toolbar、floating tools 的 pointer/click 事件必须阻止冒泡，避免误开预览。
-6. 移除 Output 图片普通点击里的隐式 `onReferenceAsset(item.asset_id)`；加入引用只通过 `Reference` 工具按钮或 dialog 底部发送。
+5. 单选后在 `board-layout-toolbar` 显示“编辑”按钮，点击后打开预览 dialog。
+6. Resize handle、layout toolbar、floating tools 的 pointer/click 事件必须阻止冒泡，避免误操作画板。
+7. 移除 Output 图片普通点击里的隐式 `onReferenceAsset(item.asset_id)`；加入引用只通过 `Reference` 工具按钮或 dialog 底部发送。
 
 ### Dialog layout
 
@@ -184,18 +186,19 @@ cd web && npm run dev
 
 手动验收时用浏览器检查：
 
-1. 点击 Output 图片打开全屏 dialog。
+1. 点击 Output 图片只选中对象，不打开全屏 dialog。
 2. 拖动 Output 图片不会打开 dialog。
 3. Shift/Cmd/Ctrl 点击仍能多选，不打开 dialog。
-4. Dialog 图片完整显示，横图、竖图、透明 PNG 都不裁切。
-5. Esc、关闭按钮、背景空白区都能关闭。
-6. Dialog 底部输入发送时，消息携带当前图片引用，主 composer 引用条不被污染。
+4. 单选后点击 `board-layout-toolbar` 的“编辑”按钮打开全屏 dialog。
+5. Dialog 图片完整显示，横图、竖图、透明 PNG 都不裁切。
+6. Esc、关闭按钮、背景空白区都能关闭。
+7. Dialog 底部输入发送时，消息携带当前图片引用，主 composer 引用条不被污染。
 
 ## others
 
 验收重点：
 
-1. Output 画板普通点击的默认结果从“加入引用”改为“打开预览 dialog”。
+1. Output 画板普通点击的默认结果从“加入引用”改为“只选中对象”，预览由选中后的“编辑”按钮打开。
 2. 画板拖拽、缩放、多选、布局工具和 camera pan/zoom 不受影响。
 3. `Reference` 工具按钮仍能把选中图片加入聊天输入引用。
 4. 全屏 dialog 与参考图一致：顶部关闭和标题、中间大图、底部描述编辑输入。
@@ -206,7 +209,7 @@ cd web && npm run dev
 
 完成实现后同步更新：
 
-1. `docs/prds/features/board/001-画板自由布局.md`：把“点击画板图片加入聊天输入区引用”改为“点击 Output 画板图片打开全屏预览；引用通过 Reference 操作或预览 dialog 发送”。
-2. `docs/prds/features/board/002-画板对象选择移动与缩放.md`：补充点击预览、拖拽不预览、追加选择不预览，以及移除普通点击隐式引用。
+1. `docs/prds/features/board/001-画板自由布局.md`：把“点击画板图片加入聊天输入区引用”改为“点击 Output 画板图片只选中对象；通过选中后的编辑按钮打开全屏预览；引用通过 Reference 操作或预览 dialog 发送”。
+2. `docs/prds/features/board/002-画板对象选择移动与缩放.md`：补充单击只选中、编辑按钮打开预览、拖拽不预览、追加选择不预览，以及移除普通点击隐式引用。
 3. `docs/prds/features/turns/002-图片引用与上传.md`：补充 Board 预览 dialog 底部描述编辑发送时自动携带当前图片引用。
 4. `docs/prds/features/ui/001-三栏工作台UI.md`：补充 Board 图片全屏预览 dialog 的顶部栏、居中大图和底部 composer。

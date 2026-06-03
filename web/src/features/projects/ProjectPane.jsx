@@ -37,6 +37,7 @@ export default function ProjectPane({
   onRenameThread,
   onDeleteThread,
   onArchiveProject,
+  onArchiveProjectThreads,
   onDeleteProject,
   onOpenSettings,
   connectionState,
@@ -208,6 +209,17 @@ export default function ProjectPane({
                         >
                           <Archive size={15} />
                           <span>归档项目</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isUnavailable}
+                          onClick={() => {
+                            setActiveProjectMenuId(null);
+                            onArchiveProjectThreads(entry);
+                          }}
+                        >
+                          <Archive size={15} />
+                          <span>归档对话</span>
                         </button>
                         <button
                           className="danger"

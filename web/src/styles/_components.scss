@@ -2619,11 +2619,19 @@
   pointer-events: auto;
 }
 
+.board-layout-toolbar.compact {
+  transform: translateX(-50%);
+}
+
 .board-layout-menu-wrap {
   position: relative;
 }
 
 .board-layout-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   height: 28px;
   padding: 0 9px;
   border: 1px solid transparent;
@@ -2632,6 +2640,10 @@
   background: transparent;
   font-size: 12px;
   font-weight: 650;
+}
+
+.board-layout-trigger svg {
+  flex: 0 0 auto;
 }
 
 .board-layout-trigger:hover {

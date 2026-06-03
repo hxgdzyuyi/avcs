@@ -347,6 +347,37 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert_reply list_ref, :ok, %{success: true, data: %{items: []}}
   end
 
+  test "archives all threads for a project through websocket events", %{
+    project: project,
+    socket: socket
+  } do
+    {:ok, first} = Avcs.Threads.create_thread(project, "First thread")
+    {:ok, second} = Avcs.Threads.create_thread(project, "Second thread")
+
+    select_ref = push(socket, "thread:select", %{"id" => first["id"]})
+    assert_reply select_ref, :ok, %{success: true, data: %{current_thread_id: selected_id}}
+    assert selected_id == first["id"]
+
+    archive_ref = push(socket, "threads:archive_all", %{"project_id" => project["id"]})
+
+    assert_reply archive_ref, :ok, %{
+      success: true,
+      data: %{
+        archived_count: 2,
+        archived_thread_ids: archived_thread_ids,
+        current_thread_id: nil,
+        project_id: project_id
+      }
+    }
+
+    assert project_id == project["id"]
+    assert Enum.sort(archived_thread_ids) == Enum.sort([first["id"], second["id"]])
+    assert Avcs.Session.current_thread_id() == nil
+
+    list_ref = push(socket, "threads:list", %{})
+    assert_reply list_ref, :ok, %{success: true, data: %{items: []}}
+  end
+
   test "lists indexed projects and selects a project through websocket events", %{
     project: project,
     socket: socket
