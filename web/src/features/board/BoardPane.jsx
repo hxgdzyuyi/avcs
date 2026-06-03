@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import IconButton from "../../components/IconButton.jsx";
 import { previewUrl } from "../../api.js";
+import ImagePreviewDialog from "./ImagePreviewDialog.jsx";
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 12;
@@ -49,6 +50,7 @@ export default function BoardPane({
   onReferenceAsset,
   onResize,
   onUpdateItems,
+  onSendImagePrompt,
   onReveal,
   onCopyPath,
   onDeleteSelected,
@@ -69,12 +71,14 @@ export default function BoardPane({
   const [primarySelectedId, setPrimarySelectedId] = useState(null);
   const [marquee, setMarquee] = useState(null);
   const [layoutMenu, setLayoutMenu] = useState(null);
+  const [previewDialog, setPreviewDialog] = useState(null);
   const visibleItems = boardItems;
   const workAssets = useMemo(() => assets.filter((asset) => isWorkAsset(asset)), [assets]);
   const selectedItems = visibleItems.filter((item) => selectedIds.includes(item.id));
   const selectedItem = selectedItems[0] || null;
   const primarySelectedItem = selectedItems.find((item) => item.id === primarySelectedId) || selectedItem;
   const selectedAsset = selectedItem ? assets.find((asset) => asset.id === selectedItem.asset_id) : null;
+  const previewAsset = previewDialog ? assets.find((asset) => asset.id === previewDialog.assetId) : null;
   const selectionBounds = useMemo(() => getItemsBounds(selectedItems), [selectedItems]);
   const zoomPercent = Math.round(camera.zoom * 100);
   const referenceSelectedLabel = selectedItems.length > 1 ? `Reference ${selectedItems.length} selected images` : "Reference selected image";
@@ -89,7 +93,23 @@ export default function BoardPane({
     setPrimarySelectedId(null);
     setMarquee(null);
     setLayoutMenu(null);
+    setPreviewDialog(null);
   }, [projectId]);
+
+  useEffect(() => {
+    if (!previewDialog) return;
+    if (activeTab !== "output") {
+      setPreviewDialog(null);
+      return;
+    }
+
+    const assetExists = assets.some((asset) => asset.id === previewDialog.assetId);
+    const itemExists = visibleItems.some(
+      (item) => item.id === previewDialog.boardItemId && item.asset_id === previewDialog.assetId,
+    );
+
+    if (!assetExists || !itemExists) setPreviewDialog(null);
+  }, [activeTab, assets, previewDialog, visibleItems]);
 
   useEffect(() => {
     const visibleIds = new Set(visibleItems.map((item) => item.id));
@@ -360,6 +380,46 @@ export default function BoardPane({
     window.addEventListener("pointercancel", up);
   }
 
+  function openPreviewDialog(item) {
+    setPreviewDialog({
+      assetId: item.asset_id,
+      boardItemId: item.id,
+      prompt: "",
+      isSending: false,
+    });
+  }
+
+  function closePreviewDialog() {
+    const boardItemId = previewDialog?.boardItemId;
+    setPreviewDialog(null);
+
+    if (boardItemId && typeof window !== "undefined") {
+      window.requestAnimationFrame(() => {
+        document.getElementById(`board-item-${boardItemId}`)?.focus({ preventScroll: true });
+      });
+    }
+  }
+
+  function updatePreviewPrompt(prompt) {
+    setPreviewDialog((current) => (current ? { ...current, prompt } : current));
+  }
+
+  async function sendPreviewPrompt() {
+    if (!previewDialog || previewDialog.isSending) return;
+
+    const text = previewDialog.prompt.trim();
+    if (!text) return;
+
+    setPreviewDialog((current) => (current ? { ...current, isSending: true } : current));
+
+    try {
+      await onSendImagePrompt(previewDialog.assetId, text);
+      closePreviewDialog();
+    } catch {
+      setPreviewDialog((current) => (current ? { ...current, isSending: false } : current));
+    }
+  }
+
   function startObjectDrag(item, event) {
     if (event.button !== 0) return;
 
@@ -375,15 +435,13 @@ export default function BoardPane({
       setSelectedIds(nextIds);
       setPrimarySelectedId(itemSelected ? nextIds[nextIds.length - 1] || null : item.id);
       movingIds = itemSelected ? [] : nextIds;
-    } else if (!itemSelected || selectedIds.length !== 1) {
-      setSelectedIds(itemSelected ? selectedIds : [item.id]);
+    } else if (!itemSelected) {
+      setSelectedIds([item.id]);
       setPrimarySelectedId(item.id);
-      movingIds = itemSelected ? selectedIds : [item.id];
     } else {
       setPrimarySelectedId(item.id);
     }
 
-    if (!additive) onReferenceAsset(item.asset_id);
     if (movingIds.length === 0) return;
 
     const startItems = visibleItems
@@ -399,9 +457,14 @@ export default function BoardPane({
       y: event.clientY,
       zoom: cameraRef.current.zoom,
       items: startItems,
+      moved: false,
     };
 
     function move(pointerEvent) {
+      const movedDistance = Math.hypot(pointerEvent.clientX - start.x, pointerEvent.clientY - start.y);
+      if (!start.moved && movedDistance <= 4) return;
+      start.moved = true;
+
       const dx = (pointerEvent.clientX - start.x) / start.zoom;
       const dy = (pointerEvent.clientY - start.y) / start.zoom;
       const updates = start.items.map((candidate) => ({
@@ -416,6 +479,15 @@ export default function BoardPane({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
+
+      if (!start.moved) {
+        if (!additive && pointerEvent.type === "pointerup") {
+          setSelectedIds([item.id]);
+          setPrimarySelectedId(item.id);
+          openPreviewDialog(item);
+        }
+        return;
+      }
 
       const dx = (pointerEvent.clientX - start.x) / start.zoom;
       const dy = (pointerEvent.clientY - start.y) / start.zoom;
@@ -629,6 +701,20 @@ export default function BoardPane({
             </div>
           </div>
 
+          {previewDialog && previewAsset ? (
+            <ImagePreviewDialog
+              asset={previewAsset}
+              prompt={previewDialog.prompt}
+              isSending={previewDialog.isSending}
+              onPromptChange={updatePreviewPrompt}
+              onSend={sendPreviewPrompt}
+              onClose={closePreviewDialog}
+              onReference={() => onReferenceAsset(previewAsset.id)}
+              onReveal={() => onReveal(previewAsset.id)}
+              onCopyPath={() => onCopyPath(previewAsset.id)}
+            />
+          ) : null}
+
           <div className="board-floating-tools" aria-label="Board tools">
             <div className="board-tool-group">
               <IconButton
@@ -737,9 +823,11 @@ function BoardObject({ item, asset, selected, onDragStart }) {
   return (
     <div
       className={`board-object ${selected ? "selected" : ""}`}
-      id={`board-${item.asset_id}`}
+      id={`board-item-${item.id}`}
+      data-asset-id={item.asset_id}
       style={style}
       onPointerDown={onDragStart}
+      tabIndex={selected ? 0 : -1}
     >
       <img alt={asset.file_name} src={previewUrl(asset)} draggable="false" />
     </div>

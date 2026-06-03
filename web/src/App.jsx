@@ -1002,6 +1002,45 @@ export default function App() {
     }
   }
 
+  async function handleArchiveProjectThreads(projectEntry) {
+    if (!channel || !projectEntry?.id) return;
+    if (
+      !window.confirm(
+        `归档项目“${projectEntry.name}”下的所有对话？项目本身不会被归档。`,
+      )
+    )
+      return;
+    setNotice("");
+
+    try {
+      const data = await channel.push("threads:archive_all", {
+        project_id: projectEntry.id,
+      });
+      const archivedCount = data.archived_count || 0;
+
+      if (project?.id === projectEntry.id) {
+        const activeProject = { ...project, current_thread_id: null };
+        setProject(activeProject);
+        setDraftProjectId(projectEntry.id);
+        currentThreadIdRef.current = null;
+        setCurrentThreadId(null);
+        resetMessageWindow(null);
+        setSelectedBoardIds([]);
+        await refreshAll(null, activeProject);
+      } else {
+        await loadProjectThreads(projectEntry.id);
+      }
+
+      setNotice(
+        archivedCount > 0
+          ? `已归档 ${archivedCount} 个对话`
+          : "没有可归档的对话",
+      );
+    } catch (error) {
+      setNotice(error.message);
+    }
+  }
+
   async function handleDeleteProject(projectEntry) {
     if (!channel || !projectEntry?.id) return;
     if (
@@ -1246,6 +1285,40 @@ export default function App() {
       clearPendingReferences();
     } catch (error) {
       setNotice(error.message);
+    }
+  }
+
+  async function handleSendImagePrompt(assetId, text) {
+    if (!channel || !project) throw new Error("Open a project folder first.");
+
+    const messageText = String(text || "").trim();
+    if (!assetId || !messageText) return null;
+    if (!assets.some((asset) => asset.id === assetId)) {
+      throw new Error("Image is no longer available.");
+    }
+
+    setNotice("");
+
+    try {
+      const thread = currentThreadId
+        ? { id: currentThreadId }
+        : await createThreadForDraft();
+      if (project?.id && thread?.id) {
+        navigateToPath(buildProjectWorkspacePath(project.id, thread.id));
+      }
+
+      const data = await channel.push("message:send", {
+        thread_id: thread.id,
+        text: messageText,
+        asset_ids: [assetId],
+        ...settingsPayload(composerSettings),
+      });
+
+      if (data.thread) applyThreadUpdate(data.thread);
+      return data;
+    } catch (error) {
+      setNotice(error.message);
+      throw error;
     }
   }
 
@@ -1851,6 +1924,7 @@ export default function App() {
           onRenameThread={handleRenameThread}
           onDeleteThread={handleDeleteThread}
           onArchiveProject={handleArchiveProject}
+          onArchiveProjectThreads={handleArchiveProjectThreads}
           onDeleteProject={handleDeleteProject}
           onOpenSettings={handleOpenSettings}
           connectionState={connectionState}
@@ -1922,6 +1996,7 @@ export default function App() {
               onReferenceAsset={addReference}
               onResize={handleResize}
               onUpdateItems={handleUpdateBoardItems}
+              onSendImagePrompt={handleSendImagePrompt}
               onReveal={handleReveal}
               onCopyPath={handleCopyPath}
               onDeleteSelected={handleDeleteSelectedBoardItem}
