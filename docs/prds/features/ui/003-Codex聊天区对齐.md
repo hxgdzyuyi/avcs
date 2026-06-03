@@ -181,7 +181,8 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 3. 基础撤销重做。
 4. 发送快捷键，例如 `Mod-Enter`。
 5. 上传图片并自动加入引用。
-6. Agent 运行中保持可编辑，但发送按钮禁用或进入 loading 状态。
+6. 通过调色盘入口配置本轮图片比例、数量和透明背景。
+7. Agent 运行中保持可编辑；composer 为空时主按钮显示 Stop，composer 非空时主按钮发送追加输入到当前 active turn。
 
 发送规则：
 
@@ -190,6 +191,10 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 3. 后端根据 asset id 解析项目内受控路径，再传给 Codex app-server。
 4. 发送成功后清空当前输入和引用。
 5. 发送失败时保留用户输入和引用，并在当前上下文展示错误。
+6. 调色盘配置只影响本次发送；发送前由前端拼接到 prompt 后面，不新增 `message:send` 字段。
+7. 调色盘配置本身不构成可发送内容；发送成功后恢复默认值。
+8. Agent 运行中且 composer 为空时，主按钮调用 `turn:stop`，不走 `message:send` 的空消息校验。
+9. Agent 运行中且 composer 非空时，`message:send` 追加 user item 并通过 `turn/steer` 发送到 active turn，不创建新 turn。
 
 视觉：
 
@@ -199,15 +204,43 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 4. 右下角放发送按钮，使用明确 action 色。
 5. Placeholder 保持一句话，例如 `Describe the image you want to create...`。
 
-### 9.1 模型选择
+### 9.1 图片生成参数
+
+聊天框需要提供调色盘入口，让用户为本轮图片生成补充轻量约束。
+
+参数：
+
+1. 图片比例：`auto`、`1:1`、`16:9`、`9:16`、`4:3`、`3:4`。
+2. 图片数量：`1`、`2`、`3`、`4`。
+3. 透明背景：开关。
+
+交互：
+
+1. Composer 底部放调色盘图标按钮。
+2. 点击打开紧凑参数面板。
+3. 有非默认配置时按钮进入 active 状态，tooltip 展示摘要。
+4. 未打开项目时禁用。
+5. Agent 运行中仍可调整下一条草稿的调色盘配置。
+
+发送拼接：
+
+1. 调色盘配置只保存在前端当前 composer 草稿中。
+2. 只影响这一次按 Enter、`Mod-Enter` 或发送按钮发出的提示词。
+3. `auto` 比例、数量 `1` 和非透明背景不拼接。
+4. 非默认项拼接为短段落，例如 `Image settings: aspect ratio 16:9; image count 2; transparent background.`。
+5. 不新增 `message:send.image_settings` 或 turn 结构化字段。
+6. 发送成功后恢复默认值，下一轮需要重新选择。
+
+### 9.2 模型选择
 
 聊天框需要对齐 Codex，让用户选择本轮使用的模型与推理强度。
 
-1. Composer 底部左侧放紧凑模型选择器，显示当前模型名与推理强度，点击展开下拉。
+1. Composer 底部放统一设置入口，显示当前模型、推理强度和权限方式摘要，点击打开设置 Dialog。
 2. 模型列表来自 Codex `model/list`，由后端拉取后经 WebSocket 暴露给前端，不在前端硬编码白名单。
 3. 推理强度选项对齐 Codex `ReasoningEffort`：`none`、`minimal`、`low`、`medium`、`high`、`xhigh`。
 4. 未显式选择时不强行写值，沿用 Codex 配置默认。
 5. 选择映射到 `turn/start` 的 `model` 与 `effort` 参数。
+6. Composer 底部摘要不显示 `Default` / `default` 占位词；模型有具体值时显示具体模型名，无法确定具体模型时省略模型片段。
 
 作用域（已决策：thread 默认 + 可被 turn 覆盖）：
 
@@ -215,13 +248,13 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 2. Composer 上的选择作用于下一条 turn；与 Codex「override for this turn and subsequent turns」语义一致，覆盖后写回 thread 默认，后续 turn 沿用。
 3. 切换 thread 时选择器回显该 thread 的默认值。
 
-### 9.2 权限方式
+### 9.3 权限方式
 
 聊天框需要让用户选择权限方式（沙箱访问级别），对齐 Codex 的运行控制。本节只覆盖非交互的沙箱预设；交互审批属于独立能力，见 `docs/prds/features/agent/002-交互审批.md`。
 
 权限选择：
 
-1. Composer 底部放权限方式选择器，呈现为少量预设档而非裸枚举：`Read Only`、`Auto`、`Full Access`。
+1. 权限方式放在 composer 统一设置 Dialog 中，呈现为少量预设档而非裸枚举：`Read Only`、`Auto`、`Full Access`。
 2. 预设映射到 `turn/start` 的 `sandboxPolicy` 时，必须使用 Codex app-server v2 schema 要求的对象形态：
    - `Read Only` → `{ "type": "readOnly", "networkAccess": true }`，agent 不可写入，仅适合纯查看。
    - `Auto`（默认）→ `{ "type": "workspaceWrite", "writableRoots": ["<current_project_path>"], "networkAccess": true }`，`writableRoots` 限定为当前项目目录。
@@ -255,6 +288,7 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 5. `models:list`：读取 Codex `model/list` 返回的可用模型（需新增）。
 6. `thread:settings:update`：更新当前 thread 的默认 `model` / `effort` / `approval_policy` / `sandbox_mode`（需新增）。
 7. `message:send` 扩展：在文本与 `asset_ids` 外，允许携带本次 turn 的 `model` / `effort` / `approval_policy` / `sandbox_mode` 覆盖值（需新增字段）。
+8. `turn:stop`：停止当前 thread 的 active turn。
 
 审批相关请求（`approval:respond` 等）属于交互审批能力，见 `agent/002-交互审批.md`。
 
@@ -267,7 +301,7 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 5. `item:updated`：更新已有 item 状态或 payload。（需新增：当前后端尚未广播，工具从 `running` 原地更新到 `completed` 依赖此事件。）
 6. `thread:items`：刷新当前 thread 的完整消息数据。
 7. `agent:run_started`：Agent 开始运行。
-8. `agent:run_completed`：Agent 运行完成。
+8. `agent:run_completed`：Agent 运行完成，`status` 可以是 `completed`、`failed` 或 `interrupted`。
 9. `error`：WebSocket、Agent、文件 API 或预览读取错误。
 
 审批相关推送（`approval:requested` / `approval:resolved`）属于交互审批能力，见 `agent/002-交互审批.md`。
@@ -293,6 +327,7 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 7. 图片生成失败：错误说明来源，保留用户输入。
 8. WebSocket 断开：保留最近一次消息列表，禁用写入操作。
 9. 资产预览失败：资产行显示缺失或不可读取状态。
+10. 用户主动停止：turn 显示 stopped/interrupted 中性色状态，不显示为普通失败。
 10. 切换 thread：清理不属于当前 thread 的临时 streaming UI。
 
 错误来源必须明确标识为 Agent、文件 API、WebSocket、预览读取或项目数据。
@@ -361,8 +396,11 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 5. 工具调用显示运行中、完成和失败状态，完成后刷新页面仍能看到结果摘要。
 6. 用户历史图片引用能在对应用户消息中看见。
 7. 生成图片在聊天中显示为资产行，并能定位到画板对象或加入下一条引用。
-8. Agent 运行中不能重复发送同一 turn，但用户仍可编辑下一条草稿。
+8. Agent 运行中空 composer 可停止当前 turn；非空 composer 可发送追加输入到当前 active turn，不能创建重复 turn。
 9. 切换 thread 不会把另一个 thread 的 streaming 文本或工具状态显示到当前 thread。
 10. 未打开项目、无消息、运行中、失败、连接断开和资产缺失都有明确状态。
-11. Composer 可选择模型与推理强度，模型列表来自 Codex `model/list`；选择作用于下一条 turn 并写回 thread 默认，切换 thread 正确回显。
-12. Composer 可选择权限方式（`Read Only` / `Auto` / `Full Access`），映射到 `turn/start` 的对象形态 `sandboxPolicy`；默认 `Auto` 为 `{ "type": "workspaceWrite", "writableRoots": ["<current_project_path>"], "networkAccess": true }` + `approvalPolicy: never`，主流程不被打断。
+11. Composer 通过统一设置 Dialog 选择模型与推理强度，模型列表来自 Codex `model/list`；选择作用于下一条 turn 并写回 thread 默认，切换 thread 正确回显。
+12. Composer 通过同一个设置 Dialog 选择权限方式（`Read Only` / `Auto` / `Full Access`），映射到 `turn/start` 的对象形态 `sandboxPolicy`；默认 `Auto` 为 `{ "type": "workspaceWrite", "writableRoots": ["<current_project_path>"], "networkAccess": true }` + `approvalPolicy: never`，主流程不被打断。
+13. Composer 底部只保留一个设置入口和紧凑摘要；摘要不出现 `Default` / `default` 占位词，有具体模型时显示具体模型名。
+14. Composer 调色盘入口支持本轮选择图片比例、图片数量和透明背景；发送时只拼接到本次 prompt，发送成功后恢复默认，不新增 WebSocket 字段。
+15. 用户主动 Stop 后 turn 状态保持为 `interrupted`，刷新后不显示红色错误块。

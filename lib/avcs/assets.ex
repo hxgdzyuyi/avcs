@@ -214,7 +214,7 @@ defmodule Avcs.Assets do
             end
 
           link_asset(db, asset["id"], thread_id, turn_id, item_id, source, now)
-          ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now)
+          ensure_output_board_item(db, asset, source, thread_id, turn_id, item_id, now)
           asset
         end)
       end)
@@ -383,7 +383,7 @@ defmodule Avcs.Assets do
 
         asset = SQLite.one!(db, "SELECT * FROM assets WHERE id = ?", [asset["id"]])
         link_asset(db, asset["id"], thread_id, turn_id, item_id, source, now)
-        ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now)
+        ensure_output_board_item(db, asset, source, thread_id, turn_id, item_id, now)
         asset
       end)
     end)
@@ -417,12 +417,28 @@ defmodule Avcs.Assets do
     end
   end
 
+  defp ensure_output_board_item(db, asset, source, thread_id, turn_id, item_id, now) do
+    if output_asset?(asset) do
+      ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now)
+    end
+  end
+
   defp ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now) do
     existing =
       SQLite.one!(db, "SELECT id FROM board_items WHERE asset_id = ? LIMIT 1", [asset["id"]])
 
     if is_nil(existing) do
-      count = SQLite.scalar!(db, "SELECT COUNT(*) AS count FROM board_items") || 0
+      count =
+        SQLite.scalar!(
+          db,
+          """
+          SELECT COUNT(*) AS count
+          FROM board_items
+          JOIN assets ON assets.id = board_items.asset_id
+          WHERE assets.relative_path LIKE 'output/%'
+          """
+        ) || 0
+
       width = numeric_or_default(asset["width"], 320)
       height = numeric_or_default(asset["height"], 240)
       display_width = width |> max(180) |> min(360)
@@ -457,6 +473,9 @@ defmodule Avcs.Assets do
       )
     end
   end
+
+  defp output_asset?(%{"relative_path" => "output/" <> _rest}), do: true
+  defp output_asset?(_asset), do: false
 
   defp dimensions(path) do
     case File.read(path) do

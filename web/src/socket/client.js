@@ -3,6 +3,7 @@ import { Socket } from "phoenix";
 const EVENTS = [
   "project:updated",
   "projects:updated",
+  "site_settings:updated",
   "threads:updated",
   "thread:items",
   "turn:started",
@@ -38,10 +39,12 @@ export function createAvcsChannel(onEvent) {
       .receive("timeout", () => reject(new Error("WebSocket join timed out")));
   });
 
-  function push(event, payload = {}) {
+  function push(event, payload = {}, timeoutMs) {
     return new Promise((resolve, reject) => {
-      channel
-        .push(event, payload)
+      const pushRef =
+        timeoutMs == null ? channel.push(event, payload) : channel.push(event, payload, timeoutMs);
+
+      pushRef
         .receive("ok", (response) => {
           if (response?.success === false) {
             reject(new Error(response.error?.message || "Channel request failed"));

@@ -43,14 +43,40 @@ defmodule Avcs.Threads do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
       now = Avcs.Time.now_iso()
       id = Ecto.UUID.generate()
+      title = clean_title(title)
+      defaults = Avcs.SiteSettings.agent_defaults()
 
       SQLite.run!(
         db,
         """
-        INSERT INTO threads (id, title, created_at, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO threads (
+          id, title, default_model, default_effort, default_approval_policy,
+          default_sandbox_mode, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        [id, clean_title(title), now, now]
+        [
+          id,
+          title,
+          defaults.model,
+          defaults.effort,
+          defaults.approval_policy,
+          defaults.sandbox_mode,
+          now,
+          now
+        ]
+      )
+
+      Avcs.Trace.append_event(
+        project,
+        %{
+          scope: "thread",
+          event_name: "thread_created",
+          thread_id: id,
+          status: "idle",
+          payload: %{title: title, defaults: defaults}
+        },
+        db: db
       )
 
       SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
@@ -60,12 +86,28 @@ defmodule Avcs.Threads do
   def rename_thread(project, id, title) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
       now = Avcs.Time.now_iso()
+      existing = SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
+      title = clean_title(title)
 
       SQLite.run!(
         db,
         "UPDATE threads SET title = ?, updated_at = ? WHERE id = ?",
-        [clean_title(title), now, id]
+        [title, now, id]
       )
+
+      if existing && existing["title"] != title do
+        Avcs.Trace.append_event(
+          project,
+          %{
+            scope: "thread",
+            event_name: "thread_title_changed",
+            thread_id: id,
+            status: existing["status"],
+            payload: %{from_title: existing["title"], to_title: title}
+          },
+          db: db
+        )
+      end
 
       SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
     end)
@@ -74,6 +116,7 @@ defmodule Avcs.Threads do
   def archive_thread(project, id) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
       now = Avcs.Time.now_iso()
+      existing = SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
 
       SQLite.run!(db, "UPDATE threads SET archived_at = ?, updated_at = ? WHERE id = ?", [
         now,
@@ -81,17 +124,51 @@ defmodule Avcs.Threads do
         id
       ])
 
+      if existing do
+        Avcs.Trace.append_event(
+          project,
+          %{
+            scope: "thread",
+            event_name: "thread_archived",
+            thread_id: id,
+            status: existing["status"],
+            payload: %{archived_at: now}
+          },
+          db: db
+        )
+      end
+
       :ok
     end)
   end
 
   def set_codex_thread_id(project, id, codex_thread_id) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+      existing = SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
+
       SQLite.run!(
         db,
         "UPDATE threads SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
         [codex_thread_id, Avcs.Time.now_iso(), id]
       )
+
+      if existing && existing["codex_thread_id"] != codex_thread_id do
+        Avcs.Trace.append_event(
+          project,
+          %{
+            scope: "thread",
+            event_name: "thread_codex_id_bound",
+            thread_id: id,
+            codex_thread_id: codex_thread_id,
+            status: existing["status"],
+            payload: %{
+              previous_codex_thread_id: existing["codex_thread_id"],
+              codex_thread_id: codex_thread_id
+            }
+          },
+          db: db
+        )
+      end
 
       :ok
     end)
@@ -102,6 +179,7 @@ defmodule Avcs.Threads do
 
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
       now = Avcs.Time.now_iso()
+      existing = SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
 
       SQLite.run!(
         db,
@@ -123,6 +201,23 @@ defmodule Avcs.Threads do
           id
         ]
       )
+
+      if trace_settings_update?(existing, settings) do
+        Avcs.Trace.append_event(
+          project,
+          %{
+            scope: "thread",
+            event_name: "thread_settings_changed",
+            thread_id: id,
+            status: existing["status"],
+            payload: %{
+              from: thread_settings_snapshot(existing),
+              to: settings
+            }
+          },
+          db: db
+        )
+      end
 
       SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
     end)
@@ -194,6 +289,21 @@ defmodule Avcs.Threads do
   defp clean_member(value, valid_values) do
     value = clean_optional_string(value)
     if value in valid_values, do: value
+  end
+
+  defp trace_settings_update?(nil, _settings), do: false
+
+  defp trace_settings_update?(existing, settings) do
+    thread_settings_snapshot(existing) != settings
+  end
+
+  defp thread_settings_snapshot(thread) do
+    %{
+      model: thread["default_model"],
+      effort: thread["default_effort"],
+      approval_policy: thread["default_approval_policy"],
+      sandbox_mode: thread["default_sandbox_mode"]
+    }
   end
 
   defp value(attrs, key) when is_map(attrs) do

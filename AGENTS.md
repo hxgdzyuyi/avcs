@@ -12,7 +12,7 @@ Avcs 是 local-first 的 AI Visual Content Studio。MVP 是 Phoenix 承载的本
 
 - 后端：Elixir / Phoenix
 - 数据库：SQLite
-  - 全局索引库：`~/.avcs/avcs.sqlite3`
+  - 全局库：`~/.avcs/avcs.sqlite3`
   - 项目库：`<project>/.avcs/project.sqlite3`
 - 前端：React + Vite
 - 前端语言：纯 JavaScript，禁止 TypeScript
@@ -177,7 +177,7 @@ Agent 调用通过 `codex app-server` 封装，不在 Avcs 内部实现独立大
 
 ## 常见错误
 
-- 不要把项目业务数据写入 `~/.avcs/avcs.sqlite3`；全局 SQLite 只保存项目关联信息。
+- 不要把项目业务数据写入 `~/.avcs/avcs.sqlite3`；全局 SQLite 只保存软件级元数据和项目关联信息。
 - 不要让 React 绕过 Phoenix 直接访问 SQLite、Codex app-server 或本地文件。
 - 不要在 React 项目中引入 TypeScript、Tailwind 或 CSS-in-JS。
 - 不要把生成图片保存到 `work/`；Agent 生成和加工结果应进入 `output/`。

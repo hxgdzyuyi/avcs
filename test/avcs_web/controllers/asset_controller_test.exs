@@ -21,6 +21,7 @@ defmodule AvcsWeb.AssetControllerTest do
 
   test "multipart upload stores an image in work and returns a reusable asset", %{
     conn: conn,
+    project: project,
     project_dir: project_dir
   } do
     upload_path =
@@ -42,6 +43,7 @@ defmodule AvcsWeb.AssetControllerTest do
     assert asset["relative_path"] =~ "work/"
     assert File.exists?(asset["file_path"])
     assert String.starts_with?(asset["file_path"], Path.join(project_dir, "work"))
+    assert {:ok, []} = Avcs.Board.list_items(project)
 
     File.rm(upload_path)
   end
@@ -56,6 +58,7 @@ defmodule AvcsWeb.AssetControllerTest do
 
     scan_conn = post(conn, ~p"/api/assets/scan", %{})
     assert %{"success" => true, "data" => %{"items" => [_asset]}} = json_response(scan_conn, 200)
+    assert {:ok, []} = Avcs.Board.list_items(project)
 
     {:ok, [asset]} = Avcs.Assets.list_assets(project)
 
@@ -74,10 +77,10 @@ defmodule AvcsWeb.AssetControllerTest do
     project: project,
     project_dir: project_dir
   } do
-    image_path = Path.join([project_dir, "work", "delete-me.png"])
+    image_path = Path.join([project_dir, "output", "delete-me.png"])
     File.write!(image_path, @png)
 
-    assert {:ok, asset} = Avcs.Assets.upsert_asset(project, image_path, source: "scan")
+    assert {:ok, asset} = Avcs.Assets.upsert_asset(project, image_path, source: "generated")
     assert {:ok, [_board_item]} = Avcs.Board.list_items(project)
 
     asset_id = asset["id"]
@@ -98,10 +101,10 @@ defmodule AvcsWeb.AssetControllerTest do
     project: project,
     project_dir: project_dir
   } do
-    image_path = Path.join([project_dir, "work", "stale.png"])
+    image_path = Path.join([project_dir, "output", "stale.png"])
     File.write!(image_path, @png)
 
-    assert {:ok, asset} = Avcs.Assets.upsert_asset(project, image_path, source: "scan")
+    assert {:ok, asset} = Avcs.Assets.upsert_asset(project, image_path, source: "generated")
     File.rm!(image_path)
 
     asset_id = asset["id"]

@@ -41,6 +41,14 @@ input:disabled {
   overflow: hidden;
 }
 
+.app-shell.collapsed-panes {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app-shell.collapsed-panes > .project-pane {
+  display: none;
+}
+
 .mobile-tabs {
   display: none;
 }
@@ -79,6 +87,20 @@ input:disabled {
   grid-template-columns: 456px minmax(640px, 1fr);
   min-width: 0;
   min-height: 0;
+}
+
+.workbench-body.collapsed-panes {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workbench.collapsed-panes .chat-pane,
+.app-shell.collapsed-panes .chat-pane {
+  display: none;
+}
+
+.workbench.collapsed-panes .board-pane,
+.app-shell.collapsed-panes .board-pane {
+  min-width: 0;
 }
 
 .chat-pane {

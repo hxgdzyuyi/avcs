@@ -5,6 +5,11 @@ defmodule Avcs.LocalFirstTest do
          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
        )
 
+  @gif Base.decode64!("R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==")
+  @png_alt Base.decode64!(
+             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3teQAAAABJRU5ErkJggg=="
+           )
+
   setup do
     project_dir =
       Path.join(System.tmp_dir!(), "avcs-local-first-#{System.unique_integer([:positive])}")
@@ -21,19 +26,24 @@ defmodule Avcs.LocalFirstTest do
     %{project: project, project_dir: project_dir}
   end
 
-  test "scan deduplicates asset records and board placement survives project reopen", %{
+  test "scan keeps work assets off board and output placement survives project reopen", %{
     project: project,
     project_dir: project_dir
   } do
     File.write!(Path.join([project_dir, "work", "a.png"]), @png)
     File.write!(Path.join([project_dir, "work", "b.png"]), @png)
+    File.write!(Path.join([project_dir, "output", "generated.gif"]), @gif)
 
-    assert {:ok, [_first, _second]} = Avcs.Assets.scan_project(project)
-    assert {:ok, [asset]} = Avcs.Assets.list_assets(project)
-    assert asset["hash"]
+    assert {:ok, scan_results} = Avcs.Assets.scan_project(project)
+    assert length(scan_results) == 3
+    assert {:ok, assets} = Avcs.Assets.list_assets(project)
+    assert length(assets) == 2
+    assert Enum.any?(assets, &String.starts_with?(&1["relative_path"], "work/"))
+    assert output_asset = Enum.find(assets, &String.starts_with?(&1["relative_path"], "output/"))
 
     assert {:ok, [board_item]} = Avcs.Board.list_items(project)
-    assert board_item["asset_id"] == asset["id"]
+    assert board_item["asset_id"] == output_asset["id"]
+    assert String.starts_with?(board_item["relative_path"], "output/")
 
     assert {:ok, moved} = Avcs.Board.move_item(project, board_item["id"], 123.5, 234.5)
     assert moved["x"] == 123.5
@@ -49,6 +59,45 @@ defmodule Avcs.LocalFirstTest do
     assert persisted["y"] == 234.5
     assert persisted["display_width"] == 456.0
     assert persisted["display_height"] == 321.0
+  end
+
+  test "batch board item updates only output items and clamps object size", %{
+    project: project,
+    project_dir: project_dir
+  } do
+    File.write!(Path.join([project_dir, "output", "one.png"]), @png)
+    File.write!(Path.join([project_dir, "output", "two.png"]), @png_alt)
+
+    assert {:ok, _scan_results} = Avcs.Assets.scan_project(project)
+    assert {:ok, board_items} = Avcs.Board.list_items(project)
+    assert length(board_items) == 2
+    [first, second] = board_items
+
+    assert {:ok, updated} =
+             Avcs.Board.update_items(project, [
+               %{"id" => first["id"], "x" => 11, "y" => "22.5"},
+               %{
+                 "id" => second["id"],
+                 "x" => 33,
+                 "display_width" => 12,
+                 "display_height" => 48
+               }
+             ])
+
+    assert length(updated) == 2
+    assert moved = Enum.find(updated, &(&1["id"] == first["id"]))
+    assert resized = Enum.find(updated, &(&1["id"] == second["id"]))
+    assert moved["x"] == 11.0
+    assert moved["y"] == 22.5
+    assert resized["x"] == 33.0
+    assert resized["display_width"] == 64.0
+    assert resized["display_height"] == 64.0
+
+    assert {:error, :invalid_board_item_update} =
+             Avcs.Board.update_items(project, [%{"id" => first["id"], "x" => "bad"}])
+
+    assert {:error, :board_item_not_found} =
+             Avcs.Board.update_items(project, [%{"id" => Ecto.UUID.generate(), "x" => 1}])
   end
 
   test "import and upload reuse an existing hash without copying another project file", %{
@@ -139,10 +188,69 @@ defmodule Avcs.LocalFirstTest do
     refute Enum.any?(threads, &(&1["id"] == second["id"]))
   end
 
+  test "turn item pages load latest, before, after, and around windows", %{
+    project: project
+  } do
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Paged thread")
+
+    turns =
+      for index <- 1..5 do
+        assert {:ok, created} =
+                 Avcs.Turns.create_user_turn(project, thread["id"], "Turn #{index}", [])
+
+        set_turn_time(project, created["turn"]["id"], index)
+        created
+      end
+
+    assert {:ok, latest} = Avcs.Turns.list_item_page(project, thread["id"], %{"limit" => 2})
+    assert Enum.map(latest.items, & &1["content"]) == ["Turn 4", "Turn 5"]
+    assert latest.page.mode == "latest"
+    assert latest.page.turn_count == 2
+    assert latest.page.has_more_before == true
+    assert latest.page.has_more_after == false
+    assert latest.page.at_latest == true
+
+    assert {:ok, before} =
+             Avcs.Turns.list_item_page(project, thread["id"], %{
+               "limit" => 2,
+               "before" => latest.page.before_cursor
+             })
+
+    assert Enum.map(before.items, & &1["content"]) == ["Turn 2", "Turn 3"]
+    assert before.page.has_more_before == true
+    assert before.page.has_more_after == true
+
+    assert {:ok, after_page} =
+             Avcs.Turns.list_item_page(project, thread["id"], %{
+               "limit" => 2,
+               "after" => before.page.after_cursor
+             })
+
+    assert Enum.map(after_page.items, & &1["content"]) == ["Turn 4", "Turn 5"]
+    assert after_page.page.has_more_after == false
+    assert after_page.page.at_latest == true
+
+    anchor_turn_id = Enum.at(turns, 2)["turn"]["id"]
+
+    assert {:ok, around} =
+             Avcs.Turns.list_item_page(project, thread["id"], %{
+               "limit" => 3,
+               "around" => %{"turn_id" => anchor_turn_id}
+             })
+
+    assert Enum.map(around.items, & &1["content"]) == ["Turn 2", "Turn 3", "Turn 4"]
+    assert around.page.anchor_turn_id == anchor_turn_id
+    assert around.page.has_more_before == true
+    assert around.page.has_more_after == true
+    assert around.page.at_latest == false
+  end
+
   test "thread defaults and turn overrides persist model and sandbox settings", %{
     project: project
   } do
     assert {:ok, thread} = Avcs.Threads.create_thread(project, "Model settings")
+    assert thread["default_model"] == "gpt-5.5"
+    assert thread["default_effort"] == "medium"
 
     settings =
       Avcs.Threads.clean_settings(%{
@@ -176,6 +284,113 @@ defmodule Avcs.LocalFirstTest do
     assert item["turn_model"] == "gpt-5.1"
     assert item["turn_effort"] == "high"
     assert item["turn_sandbox_mode"] == "danger-full-access"
+  end
+
+  test "new threads inherit global agent defaults", %{project: project} do
+    setting_keys = [
+      "agent.default_model",
+      "agent.default_effort",
+      "agent.default_approval_policy",
+      "agent.default_sandbox_mode"
+    ]
+
+    on_exit(fn -> Avcs.SiteSettings.reset_settings(setting_keys) end)
+
+    assert {:ok, _settings} =
+             Avcs.SiteSettings.update_settings(%{
+               "agent.default_model" => "gpt-5.1",
+               "agent.default_effort" => "medium",
+               "agent.default_approval_policy" => "on-request",
+               "agent.default_sandbox_mode" => "read-only"
+             })
+
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Global defaults")
+    assert thread["default_model"] == "gpt-5.1"
+    assert thread["default_effort"] == "medium"
+    assert thread["default_approval_policy"] == "on-request"
+    assert thread["default_sandbox_mode"] == "read-only"
+  end
+
+  test "trace events keep codex item lifecycle when item snapshot is overwritten", %{
+    project: project
+  } do
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Trace lifecycle")
+    assert {:ok, created} = Avcs.Turns.create_user_turn(project, thread["id"], "Run tool", [])
+
+    assert {:ok, running_item} =
+             Avcs.Turns.upsert_codex_item(project,
+               turn_id: created["turn"]["id"],
+               thread_id: thread["id"],
+               codex_item_id: "tool-1",
+               type: "tool_call",
+               role: "tool",
+               content: "echo start",
+               status: "running",
+               payload: %{codex_item: %{"id" => "tool-1", "status" => "running"}}
+             )
+
+    assert {:ok, completed_item} =
+             Avcs.Turns.upsert_codex_item(project,
+               turn_id: created["turn"]["id"],
+               thread_id: thread["id"],
+               codex_item_id: "tool-1",
+               type: "tool_result",
+               role: "tool",
+               content: "echo done",
+               status: "completed",
+               payload: %{codex_item: %{"id" => "tool-1", "status" => "completed"}}
+             )
+
+    assert running_item["id"] == completed_item["id"]
+
+    {:ok, items} = Avcs.Turns.list_items(project, thread["id"])
+
+    assert [%{"type" => "tool_result", "status" => "completed"}] =
+             Enum.filter(items, &(&1["codex_item_id"] == "tool-1"))
+
+    assert {:ok, events} = Avcs.Trace.list_events(project, thread["id"])
+    tool_events = Enum.filter(events, &(&1["codex_item_id"] == "tool-1"))
+
+    assert Enum.any?(
+             tool_events,
+             &(&1["event_name"] == "item_created" and &1["status"] == "running")
+           )
+
+    assert Enum.any?(
+             tool_events,
+             &(&1["event_name"] == "item_updated" and &1["status"] == "completed")
+           )
+  end
+
+  test "trace events omit large base64 fields and keep a compact trace", %{project: project} do
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Trace sanitizer")
+    large_result = String.duplicate("A", 120_000)
+
+    assert {:ok, _event} =
+             Avcs.Trace.append_event(project, %{
+               scope: "item",
+               event_name: "item_completed",
+               thread_id: thread["id"],
+               codex_item_id: "image-1",
+               status: "completed",
+               payload: %{"item" => %{"type" => "imageGeneration", "result" => large_result}},
+               raw: %{
+                 "method" => "item/completed",
+                 "params" => %{"item" => %{"id" => "image-1", "result" => large_result}}
+               }
+             })
+
+    assert {:ok, events} = Avcs.Trace.list_events(project, thread["id"])
+    event = Enum.find(events, &(&1["codex_item_id"] == "image-1"))
+
+    assert get_in(event, ["payload", "item", "result", "omitted"]) == true
+    assert get_in(event, ["raw", "params", "item", "result", "omitted"]) == true
+    assert get_in(event, ["payload", "item", "result", "size_bytes"]) == byte_size(large_result)
+    assert Enum.any?(event["omitted"], &(&1["path"] == "payload.item.result"))
+    assert Enum.any?(event["omitted"], &(&1["path"] == "raw.params.item.result"))
+
+    encoded = Jason.encode!(event)
+    refute String.contains?(encoded, String.slice(large_result, 0, 2_000))
   end
 
   test "project path boundary rejects files outside the project folder", %{
@@ -248,5 +463,28 @@ defmodule Avcs.LocalFirstTest do
 
     assert {:error, reason} = Avcs.Projects.create_blank_project("../outside")
     assert reason == "Project name cannot contain path separators"
+  end
+
+  defp set_turn_time(project, turn_id, index) do
+    timestamp = "2026-06-03T10:00:#{String.pad_leading(to_string(index), 2, "0")}Z"
+
+    assert {:ok, :ok} =
+             Avcs.Storage.SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+               Avcs.Storage.SQLite.run!(
+                 db,
+                 "UPDATE turns SET created_at = ?, updated_at = ? WHERE id = ?",
+                 [timestamp, timestamp, turn_id]
+               )
+
+               Avcs.Storage.SQLite.run!(
+                 db,
+                 "UPDATE items SET created_at = ?, updated_at = ? WHERE turn_id = ?",
+                 [timestamp, timestamp, turn_id]
+               )
+
+               :ok
+             end)
+
+    timestamp
   end
 end

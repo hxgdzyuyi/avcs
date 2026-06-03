@@ -1,5 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Copy, FolderOpen, Image, Maximize2, Minimize2, MousePointer2, Paperclip, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import {
+  AlignCenterHorizontal,
+  AlignCenterVertical,
+  AlignEndHorizontal,
+  AlignEndVertical,
+  AlignStartHorizontal,
+  AlignStartVertical,
+  Copy,
+  FolderOpen,
+  Hand,
+  Image,
+  Maximize2,
+  Minimize2,
+  MousePointer2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Paperclip,
+  RotateCcw,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import IconButton from "../../components/IconButton.jsx";
 import { previewUrl } from "../../api.js";
 
@@ -14,13 +34,11 @@ const WHEEL_ZOOM_MAX_FACTOR = 1.22;
 const WHEEL_DELTA_LINE = 1;
 const WHEEL_DELTA_PAGE = 2;
 const BUTTON_ZOOM_FACTOR = 1.3;
+const TIDY_SPACE = 16;
 
-const FILTERS = [
-  ["all", "All images", "All"],
-  ["thread", "Current thread", "Thread"],
-  ["generated", "Generated", "Generated"],
-  ["imported", "Imported", "Imported"],
-  ["recent", "Recent", "Recent"],
+const BOARD_TABS = [
+  ["output", "Output"],
+  ["work", "Work"],
 ];
 
 export default function BoardPane({
@@ -28,17 +46,16 @@ export default function BoardPane({
   assets,
   selectedIds,
   setSelectedIds,
-  filter,
-  setFilter,
-  currentThreadId,
   onReferenceAsset,
-  onMove,
   onResize,
+  onUpdateItems,
   onReveal,
   onCopyPath,
   onDeleteSelected,
   focusRequest,
   projectId,
+  collapsedLeftAndMiddle,
+  onToggleLeftAndMiddle,
 }) {
   const viewportRef = useRef(null);
   const cameraRef = useRef(DEFAULT_CAMERA);
@@ -47,16 +64,21 @@ export default function BoardPane({
   const lastGestureAtRef = useRef(0);
   const [camera, setCamera] = useState(DEFAULT_CAMERA);
   const [isPanning, setIsPanning] = useState(false);
-  const visibleItems = useMemo(
-    () => boardItems.filter((item) => matchesFilter(item, filter, currentThreadId)),
-    [boardItems, currentThreadId, filter],
-  );
+  const [activeTab, setActiveTab] = useState("output");
+  const [toolMode, setToolMode] = useState("select");
+  const [primarySelectedId, setPrimarySelectedId] = useState(null);
+  const [marquee, setMarquee] = useState(null);
+  const [layoutMenu, setLayoutMenu] = useState(null);
+  const visibleItems = boardItems;
+  const workAssets = useMemo(() => assets.filter((asset) => isWorkAsset(asset)), [assets]);
   const selectedItems = visibleItems.filter((item) => selectedIds.includes(item.id));
   const selectedItem = selectedItems[0] || null;
+  const primarySelectedItem = selectedItems.find((item) => item.id === primarySelectedId) || selectedItem;
   const selectedAsset = selectedItem ? assets.find((asset) => asset.id === selectedItem.asset_id) : null;
-  const filterLabel = FILTERS.find(([value]) => value === filter)?.[1] || "All images";
+  const selectionBounds = useMemo(() => getItemsBounds(selectedItems), [selectedItems]);
   const zoomPercent = Math.round(camera.zoom * 100);
   const referenceSelectedLabel = selectedItems.length > 1 ? `Reference ${selectedItems.length} selected images` : "Reference selected image";
+  const activeCount = activeTab === "work" ? workAssets.length : visibleItems.length;
 
   useEffect(() => {
     cameraRef.current = camera;
@@ -64,7 +86,16 @@ export default function BoardPane({
 
   useEffect(() => {
     updateCamera(DEFAULT_CAMERA);
+    setPrimarySelectedId(null);
+    setMarquee(null);
+    setLayoutMenu(null);
   }, [projectId]);
+
+  useEffect(() => {
+    const visibleIds = new Set(visibleItems.map((item) => item.id));
+    setSelectedIds((current) => current.filter((id) => visibleIds.has(id)));
+    setPrimarySelectedId((current) => (current && visibleIds.has(current) ? current : null));
+  }, [visibleItems, setSelectedIds]);
 
   useEffect(() => {
     function handleKeyDown(event) {
@@ -263,6 +294,144 @@ export default function BoardPane({
     window.addEventListener("pointercancel", up);
   }
 
+  function startCanvasPointer(event) {
+    if (toolMode === "pan") {
+      startPan(event);
+      return;
+    }
+
+    startMarquee(event);
+  }
+
+  function startMarquee(event) {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    const startScreen = eventToScreenPoint(event);
+    if (!startScreen) return;
+
+    const additive = event.shiftKey || event.metaKey || event.ctrlKey;
+    const startWorld = screenToWorld(startScreen, cameraRef.current);
+    const start = {
+      screen: startScreen,
+      world: startWorld,
+      moved: false,
+    };
+
+    function move(pointerEvent) {
+      const point = eventToScreenPoint(pointerEvent);
+      if (!point) return;
+
+      if (Math.hypot(point.x - start.screen.x, point.y - start.screen.y) > 4) {
+        start.moved = true;
+      }
+
+      setMarquee(screenRectFromPoints(start.screen, point));
+    }
+
+    function up(pointerEvent) {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+
+      const endScreen = eventToScreenPoint(pointerEvent) || start.screen;
+      const endWorld = screenToWorld(endScreen, cameraRef.current);
+      setMarquee(null);
+
+      if (!start.moved) {
+        if (!additive && pointerEvent.type === "pointerup") {
+          setSelectedIds([]);
+          setPrimarySelectedId(null);
+        }
+        return;
+      }
+
+      const worldRect = worldRectFromPoints(start.world, endWorld);
+      const hitIds = visibleItems
+        .filter((item) => rectsIntersect(worldRect, itemWorldRect(item)))
+        .map((item) => item.id);
+
+      setSelectedIds((current) => (additive ? mergeIds(current, hitIds) : hitIds));
+      setPrimarySelectedId(hitIds[hitIds.length - 1] || (additive ? primarySelectedId : null));
+    }
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  function startObjectDrag(item, event) {
+    if (event.button !== 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const additive = event.shiftKey || event.metaKey || event.ctrlKey;
+    const itemSelected = selectedIds.includes(item.id);
+    let movingIds = itemSelected ? selectedIds : [item.id];
+
+    if (additive) {
+      const nextIds = itemSelected ? selectedIds.filter((id) => id !== item.id) : [...selectedIds, item.id];
+      setSelectedIds(nextIds);
+      setPrimarySelectedId(itemSelected ? nextIds[nextIds.length - 1] || null : item.id);
+      movingIds = itemSelected ? [] : nextIds;
+    } else if (!itemSelected || selectedIds.length !== 1) {
+      setSelectedIds(itemSelected ? selectedIds : [item.id]);
+      setPrimarySelectedId(item.id);
+      movingIds = itemSelected ? selectedIds : [item.id];
+    } else {
+      setPrimarySelectedId(item.id);
+    }
+
+    if (!additive) onReferenceAsset(item.asset_id);
+    if (movingIds.length === 0) return;
+
+    const startItems = visibleItems
+      .filter((candidate) => movingIds.includes(candidate.id))
+      .map((candidate) => ({
+        id: candidate.id,
+        x: Number(candidate.x),
+        y: Number(candidate.y),
+      }));
+
+    const start = {
+      x: event.clientX,
+      y: event.clientY,
+      zoom: cameraRef.current.zoom,
+      items: startItems,
+    };
+
+    function move(pointerEvent) {
+      const dx = (pointerEvent.clientX - start.x) / start.zoom;
+      const dy = (pointerEvent.clientY - start.y) / start.zoom;
+      const updates = start.items.map((candidate) => ({
+        id: candidate.id,
+        x: normalizeNumber(candidate.x + dx),
+        y: normalizeNumber(candidate.y + dy),
+      }));
+      onUpdateItems(updates, false);
+    }
+
+    function up(pointerEvent) {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+
+      const dx = (pointerEvent.clientX - start.x) / start.zoom;
+      const dy = (pointerEvent.clientY - start.y) / start.zoom;
+      const updates = start.items.map((candidate) => ({
+        id: candidate.id,
+        x: normalizeNumber(candidate.x + dx),
+        y: normalizeNumber(candidate.y + dy),
+      }));
+      onUpdateItems(updates, pointerEvent.type === "pointerup");
+    }
+
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
   function startResize(item, event) {
     event.preventDefault();
     event.stopPropagation();
@@ -332,19 +501,14 @@ export default function BoardPane({
     updateCamera(DEFAULT_CAMERA);
   }
 
-  function selectItem(item, event) {
-    const additive = event.shiftKey || event.metaKey || event.ctrlKey;
-
-    setSelectedIds((current) => {
-      if (!additive) return [item.id];
-      return current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id];
-    });
-
-    if (!additive) onReferenceAsset(item.asset_id);
-  }
-
   function referenceSelectedItems() {
     selectedItems.forEach((item) => onReferenceAsset(item.asset_id));
+  }
+
+  function applyLayout(action) {
+    const updates = layoutUpdates(action, selectedItems, primarySelectedItem);
+    setLayoutMenu(null);
+    if (updates.length > 0) onUpdateItems(updates, true);
   }
 
   return (
@@ -352,119 +516,217 @@ export default function BoardPane({
       <div className="pane-header">
         <div>
           <span className="eyebrow">Board</span>
-          <h2>{filterLabel}</h2>
-          <span className="board-count">{visibleItems.length} images</span>
+          <h2>{activeTab === "work" ? "Work" : "Output"}</h2>
+          <span className="board-count">{activeCount} images</span>
         </div>
         <div className="board-controls">
-          <div className="segmented board-filter" title="Filter board items">
-            {FILTERS.map(([value, _label, shortLabel]) => (
-              <button className={filter === value ? "active" : ""} type="button" key={value} onClick={() => setFilter(value)}>
-                {shortLabel}
+          <IconButton
+            className="board-collapse-toggle"
+            label={collapsedLeftAndMiddle ? "展开左栏与中栏" : "折叠左栏与中栏"}
+            onClick={onToggleLeftAndMiddle}
+          >
+            {collapsedLeftAndMiddle ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+          </IconButton>
+          <div className="segmented board-filter" role="tablist" aria-label="Board source">
+            {BOARD_TABS.map(([value, label]) => (
+              <button
+                aria-selected={activeTab === value}
+                className={activeTab === value ? "active" : ""}
+                role="tab"
+                type="button"
+                key={value}
+                onClick={() => setActiveTab(value)}
+              >
+                {label}
               </button>
             ))}
           </div>
         </div>
       </div>
 
-      <div
-        className={`board-shell ${isPanning ? "panning" : ""}`}
-        ref={viewportRef}
-      >
-        <div
-          className="board-canvas"
-          onPointerDown={startPan}
-        >
+      {activeTab === "work" ? (
+        <WorkAssetList
+          assets={workAssets}
+          onReferenceAsset={onReferenceAsset}
+          onReveal={onReveal}
+          onCopyPath={onCopyPath}
+        />
+      ) : (
+        <>
           <div
-            className="board-world"
-            style={{
-              transform: `matrix(${camera.zoom}, 0, 0, ${camera.zoom}, ${-camera.x * camera.zoom}, ${-camera.y * camera.zoom})`,
-            }}
+            className={`board-shell ${isPanning ? "panning" : ""} ${toolMode === "select" ? "selecting" : "pan-tool"}`}
+            ref={viewportRef}
           >
-            {visibleItems.map((item) => {
-              const asset = assets.find((candidate) => candidate.id === item.asset_id) || { ...item, id: item.asset_id };
-              const selected = selectedIds.includes(item.id);
+            <div
+              className="board-canvas"
+              onPointerDown={startCanvasPointer}
+            >
+              <div
+                className="board-world"
+                style={{
+                  transform: `matrix(${camera.zoom}, 0, 0, ${camera.zoom}, ${-camera.x * camera.zoom}, ${-camera.y * camera.zoom})`,
+                }}
+              >
+                {visibleItems.map((item) => {
+                  const asset = assets.find((candidate) => candidate.id === item.asset_id) || { ...item, id: item.asset_id };
+                  const selected = selectedIds.includes(item.id);
 
-              return (
-                <BoardObject
-                  key={item.id}
-                  item={item}
-                  asset={asset}
-                  selected={selected}
-                  zoom={camera.zoom}
-                  onSelect={(event) => selectItem(item, event)}
-                  onMove={onMove}
-                />
-              );
-            })}
-          </div>
+                  return (
+                    <BoardObject
+                      key={item.id}
+                      item={item}
+                      asset={asset}
+                      selected={selected}
+                      onDragStart={(event) => startObjectDrag(item, event)}
+                    />
+                  );
+                })}
+              </div>
 
-          <div className="board-overlay">
-            <div className="board-group-title">{filterLabel}</div>
-            {selectedItems.map((item) => {
-              const asset = assets.find((candidate) => candidate.id === item.asset_id) || { ...item, id: item.asset_id };
+              <div className="board-overlay">
+                <div className="board-group-title">Output</div>
+                {selectedItems.map((item) => {
+                  const asset = assets.find((candidate) => candidate.id === item.asset_id) || { ...item, id: item.asset_id };
 
-              return (
-                <SelectionOverlay
-                  key={item.id}
-                  item={item}
-                  asset={asset}
-                  camera={camera}
-                  selectedCount={selectedItems.length}
-                  onResizeStart={startResize}
-                />
-              );
-            })}
-          </div>
+                  return (
+                    <SelectionOverlay
+                      key={item.id}
+                      item={item}
+                      asset={asset}
+                      camera={camera}
+                      selectedCount={selectedItems.length}
+                      onResizeStart={selectedItems.length === 1 ? startResize : null}
+                    />
+                  );
+                })}
+                {selectionBounds && selectedItems.length > 1 ? (
+                  <SelectionBounds
+                    bounds={selectionBounds}
+                    camera={camera}
+                    selectedCount={selectedItems.length}
+                  />
+                ) : null}
+                {marquee ? <div className="board-marquee" style={rectStyle(marquee)} /> : null}
+                {selectionBounds && selectedItems.length > 1 ? (
+                  <LayoutToolbar
+                    bounds={selectionBounds}
+                    camera={camera}
+                    viewportRef={viewportRef}
+                    layoutMenu={layoutMenu}
+                    setLayoutMenu={setLayoutMenu}
+                    onApply={applyLayout}
+                    canTidy={selectedItems.length >= 2}
+                  />
+                ) : null}
+              </div>
 
-          {visibleItems.length === 0 ? (
-            <div className="empty-board">
-              <Image size={36} />
-              <span>Images appear here after upload, scan, import, or generation.</span>
+              {visibleItems.length === 0 ? (
+                <div className="empty-board">
+                  <Image size={36} />
+                  <span>Output images appear here after generation or output scan.</span>
+                </div>
+              ) : null}
             </div>
-          ) : null}
-        </div>
-      </div>
+          </div>
 
-      <div className="board-floating-tools" aria-label="Board tools">
-        <div className="board-tool-group">
-          <IconButton label="Select mode" className="active">
-            <MousePointer2 size={15} />
-          </IconButton>
-          <IconButton label={referenceSelectedLabel} onClick={referenceSelectedItems} disabled={selectedItems.length === 0}>
-            <Paperclip size={15} />
-          </IconButton>
-          <IconButton label="Open containing folder" onClick={() => selectedItem && onReveal(selectedItem.asset_id)} disabled={!selectedItem}>
-            <FolderOpen size={15} />
-          </IconButton>
-          <IconButton label={`Copy path${selectedAsset?.file_name ? ` for ${selectedAsset.file_name}` : ""}`} onClick={() => selectedItem && onCopyPath(selectedItem.asset_id)} disabled={!selectedItem}>
-            <Copy size={15} />
-          </IconButton>
-        </div>
-        <div className="board-tool-divider" />
-        <div className="board-tool-group">
-          <IconButton label="Zoom in" onClick={() => zoomAtViewportCenter(BUTTON_ZOOM_FACTOR)} disabled={camera.zoom >= MAX_ZOOM}>
-            <ZoomIn size={15} />
-          </IconButton>
-          <IconButton label="Zoom out" onClick={() => zoomAtViewportCenter(1 / BUTTON_ZOOM_FACTOR)} disabled={camera.zoom <= MIN_ZOOM}>
-            <ZoomOut size={15} />
-          </IconButton>
-          <IconButton label="Reset zoom" onClick={resetCamera}>
-            <RotateCcw size={15} />
-          </IconButton>
-          <IconButton label="Fit selected" onClick={() => fitItems(selectedItems)} disabled={selectedItems.length === 0}>
-            <Minimize2 size={15} />
-          </IconButton>
-          <IconButton label="Fit all" onClick={() => fitItems(visibleItems)} disabled={visibleItems.length === 0}>
-            <Maximize2 size={15} />
-          </IconButton>
-          <span className="board-zoom-readout">{zoomPercent}%</span>
-        </div>
-      </div>
+          <div className="board-floating-tools" aria-label="Board tools">
+            <div className="board-tool-group">
+              <IconButton
+                label="Select mode"
+                className={toolMode === "select" ? "active" : ""}
+                onClick={() => setToolMode("select")}
+              >
+                <MousePointer2 size={15} />
+              </IconButton>
+              <IconButton
+                label="Pan mode"
+                className={toolMode === "pan" ? "active" : ""}
+                onClick={() => setToolMode("pan")}
+              >
+                <Hand size={15} />
+              </IconButton>
+              <IconButton label={referenceSelectedLabel} onClick={referenceSelectedItems} disabled={selectedItems.length === 0}>
+                <Paperclip size={15} />
+              </IconButton>
+              <IconButton label="Open containing folder" onClick={() => selectedItem && onReveal(selectedItem.asset_id)} disabled={!selectedItem}>
+                <FolderOpen size={15} />
+              </IconButton>
+              <IconButton label={`Copy path${selectedAsset?.file_name ? ` for ${selectedAsset.file_name}` : ""}`} onClick={() => selectedItem && onCopyPath(selectedItem.asset_id)} disabled={!selectedItem}>
+                <Copy size={15} />
+              </IconButton>
+            </div>
+            <div className="board-tool-divider" />
+            <div className="board-tool-group">
+              <IconButton label="Zoom in" onClick={() => zoomAtViewportCenter(BUTTON_ZOOM_FACTOR)} disabled={camera.zoom >= MAX_ZOOM}>
+                <ZoomIn size={15} />
+              </IconButton>
+              <IconButton label="Zoom out" onClick={() => zoomAtViewportCenter(1 / BUTTON_ZOOM_FACTOR)} disabled={camera.zoom <= MIN_ZOOM}>
+                <ZoomOut size={15} />
+              </IconButton>
+              <IconButton label="Reset zoom" onClick={resetCamera}>
+                <RotateCcw size={15} />
+              </IconButton>
+              <IconButton label="Fit selected" onClick={() => fitItems(selectedItems)} disabled={selectedItems.length === 0}>
+                <Minimize2 size={15} />
+              </IconButton>
+              <IconButton label="Fit all" onClick={() => fitItems(visibleItems)} disabled={visibleItems.length === 0}>
+                <Maximize2 size={15} />
+              </IconButton>
+              <span className="board-zoom-readout">{zoomPercent}%</span>
+            </div>
+          </div>
+        </>
+      )}
     </section>
   );
 }
 
-function BoardObject({ item, asset, selected, zoom, onSelect, onMove }) {
+function WorkAssetList({ assets, onReferenceAsset, onReveal, onCopyPath }) {
+  return (
+    <div className="work-assets">
+      {assets.length === 0 ? (
+        <div className="empty-work-assets">
+          <Image size={34} />
+          <span>Work images appear here after import, upload, paste, or scan.</span>
+        </div>
+      ) : (
+        <div className="work-asset-list" role="list" aria-label="Work images">
+          {assets.map((asset) => (
+            <div className="work-asset-row" role="listitem" key={asset.id}>
+              <button
+                className="work-asset-main"
+                type="button"
+                onClick={() => onReferenceAsset(asset.id)}
+              >
+                <span className="work-asset-thumb">
+                  <img alt={asset.file_name} src={previewUrl(asset)} draggable="false" />
+                </span>
+                <span className="work-asset-meta">
+                  <strong>{asset.file_name}</strong>
+                  <span>{asset.relative_path}</span>
+                  <small>{assetDimensions(asset)}</small>
+                </span>
+              </button>
+              <div className="work-asset-actions">
+                <IconButton label={`Reference ${asset.file_name}`} onClick={() => onReferenceAsset(asset.id)}>
+                  <Paperclip size={15} />
+                </IconButton>
+                <IconButton label={`Open containing folder for ${asset.file_name}`} onClick={() => onReveal(asset.id)}>
+                  <FolderOpen size={15} />
+                </IconButton>
+                <IconButton label={`Copy path for ${asset.file_name}`} onClick={() => onCopyPath(asset.id)}>
+                  <Copy size={15} />
+                </IconButton>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BoardObject({ item, asset, selected, onDragStart }) {
   const style = {
     transform: `translate(${item.x}px, ${item.y}px)`,
     width: `${item.display_width}px`,
@@ -472,40 +734,12 @@ function BoardObject({ item, asset, selected, zoom, onSelect, onMove }) {
     zIndex: item.z_index,
   };
 
-  function startDrag(event) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    onSelect(event);
-
-    const start = { x: event.clientX, y: event.clientY, zoom, itemX: Number(item.x), itemY: Number(item.y) };
-
-    function move(pointerEvent) {
-      const x = start.itemX + (pointerEvent.clientX - start.x) / start.zoom;
-      const y = start.itemY + (pointerEvent.clientY - start.y) / start.zoom;
-      onMove(item.id, normalizeNumber(x), normalizeNumber(y), false);
-    }
-
-    function up(pointerEvent) {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("pointercancel", up);
-      const x = start.itemX + (pointerEvent.clientX - start.x) / start.zoom;
-      const y = start.itemY + (pointerEvent.clientY - start.y) / start.zoom;
-      onMove(item.id, normalizeNumber(x), normalizeNumber(y), pointerEvent.type === "pointerup");
-    }
-
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("pointercancel", up);
-  }
-
   return (
     <div
       className={`board-object ${selected ? "selected" : ""}`}
       id={`board-${item.asset_id}`}
       style={style}
-      onPointerDown={startDrag}
+      onPointerDown={onDragStart}
     >
       <img alt={asset.file_name} src={previewUrl(asset)} draggable="false" />
     </div>
@@ -525,36 +759,116 @@ function SelectionOverlay({ item, asset, camera, selectedCount, onResizeStart })
   return (
     <div className="selection-overlay" style={style}>
       <div className="selection-frame" />
-      <span className="control-point nw" />
-      <span className="control-point ne" />
-      <span className="control-point sw" />
-      <button className="resize-handle control-point se" type="button" aria-label="Resize image" onPointerDown={(event) => onResizeStart(item, event)} />
-      <div className="object-label">
-        <strong>{asset.file_name}</strong>
-        <span>
-          {Math.round(item.display_width)} x {Math.round(item.display_height)}
-        </span>
-        {selectedCount > 1 ? <span>{selectedCount} selected</span> : null}
-      </div>
+      {selectedCount === 1 ? (
+        <>
+          <span className="control-point nw" />
+          <span className="control-point ne" />
+          <span className="control-point sw" />
+          <button className="resize-handle control-point se" type="button" aria-label="Resize image" onPointerDown={(event) => onResizeStart?.(item, event)} />
+          <div className="object-label">
+            <strong>{asset.file_name}</strong>
+            <span>
+              {Math.round(item.display_width)} x {Math.round(item.display_height)}
+            </span>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
 
-function matchesFilter(item, filter, currentThreadId) {
-  const source = item.asset_source || item.source;
+function SelectionBounds({ bounds, camera, selectedCount }) {
+  const screenBounds = worldBoundsToScreen(
+    {
+      x: bounds.x,
+      y: bounds.y,
+      display_width: bounds.width,
+      display_height: bounds.height,
+    },
+    camera,
+  );
 
-  if (filter === "thread") return Boolean(currentThreadId && item.thread_id === currentThreadId);
-  if (filter === "generated") return source === "generated";
-  if (filter === "imported") return source === "import" || source === "upload" || source === "scan";
-  if (filter === "recent") return isRecent(item.created_at);
-
-  return true;
+  return (
+    <div className="board-selection-bounds" style={rectStyle(screenBounds)}>
+      <span>{selectedCount} selected</span>
+    </div>
+  );
 }
 
-function isRecent(value) {
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return false;
-  return Date.now() - timestamp <= 24 * 60 * 60 * 1000;
+function LayoutToolbar({ bounds, camera, viewportRef, layoutMenu, setLayoutMenu, onApply, canTidy }) {
+  const position = layoutToolbarPosition(bounds, camera, viewportRef.current);
+
+  return (
+    <div
+      className="board-layout-toolbar"
+      style={{ left: `${position.left}px`, top: `${position.top}px` }}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <ToolbarMenu
+        name="align"
+        label="Align"
+        open={layoutMenu === "align"}
+        setLayoutMenu={setLayoutMenu}
+        items={[
+          ["align-left", "Align Left", <AlignStartVertical size={14} />],
+          ["align-center-x", "Horizontal Center", <AlignCenterVertical size={14} />],
+          ["align-right", "Align Right", <AlignEndVertical size={14} />],
+          ["align-top", "Align Top", <AlignStartHorizontal size={14} />],
+          ["align-center-y", "Vertical Center", <AlignCenterHorizontal size={14} />],
+          ["align-bottom", "Align Bottom", <AlignEndHorizontal size={14} />],
+          ["normalize-width", "Normalize Width"],
+          ["normalize-height", "Normalize Height"],
+        ]}
+        onApply={onApply}
+      />
+      <ToolbarMenu
+        name="tidy"
+        label="Tidy"
+        open={layoutMenu === "tidy"}
+        setLayoutMenu={setLayoutMenu}
+        menuClassName="wide"
+        items={[
+          ["tidy-horizontal", "Tidy Horizontal Space", null, !canTidy],
+          ["tidy-vertical", "Tidy Vertical Space", null, !canTidy],
+        ]}
+        onApply={onApply}
+      />
+    </div>
+  );
+}
+
+function ToolbarMenu({ name, label, open, setLayoutMenu, items, onApply, menuClassName = "" }) {
+  return (
+    <div className="board-layout-menu-wrap">
+      <button type="button" className="board-layout-trigger" onClick={() => setLayoutMenu(open ? null : name)}>
+        {label}
+      </button>
+      {open ? (
+        <div className={`board-layout-menu ${menuClassName}`}>
+          {items.map(([action, itemLabel, icon, disabled]) => (
+            <button type="button" key={action} disabled={disabled} onClick={() => onApply(action)}>
+              <span>{icon}</span>
+              <strong>{itemLabel}</strong>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function isWorkAsset(asset) {
+  return typeof asset?.relative_path === "string" && asset.relative_path.startsWith("work/");
+}
+
+function assetDimensions(asset) {
+  const width = Number(asset?.width);
+  const height = Number(asset?.height);
+  if (Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0) {
+    return `${Math.round(width)} x ${Math.round(height)}`;
+  }
+
+  return "Image";
 }
 
 function isEditableTarget(target) {
@@ -575,7 +889,11 @@ function screenToWorld(point, camera) {
 }
 
 function eventToScreenPoint(event) {
-  const viewport = event.currentTarget || document.querySelector(".board-shell");
+  const currentTarget = event.currentTarget;
+  const viewport =
+    currentTarget instanceof Element
+      ? currentTarget
+      : document.querySelector(".board-shell");
   const rect = viewport?.getBoundingClientRect();
   if (!rect) return null;
 
@@ -635,6 +953,159 @@ function getItemsBounds(items) {
     width: Math.max(1, right - left),
     height: Math.max(1, bottom - top),
   };
+}
+
+function itemWorldRect(item) {
+  return {
+    left: Number(item.x),
+    top: Number(item.y),
+    right: Number(item.x) + Number(item.display_width),
+    bottom: Number(item.y) + Number(item.display_height),
+  };
+}
+
+function screenRectFromPoints(start, end) {
+  const left = Math.min(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  return {
+    left,
+    top,
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
+  };
+}
+
+function worldRectFromPoints(start, end) {
+  const left = Math.min(start.x, end.x);
+  const top = Math.min(start.y, end.y);
+  return {
+    left,
+    top,
+    right: Math.max(start.x, end.x),
+    bottom: Math.max(start.y, end.y),
+  };
+}
+
+function rectsIntersect(a, b) {
+  return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
+}
+
+function rectStyle(rect) {
+  return {
+    left: `${rect.left}px`,
+    top: `${rect.top}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+  };
+}
+
+function mergeIds(current, additions) {
+  const merged = [...current];
+  additions.forEach((id) => {
+    if (!merged.includes(id)) merged.push(id);
+  });
+  return merged;
+}
+
+function layoutToolbarPosition(bounds, camera, viewport) {
+  const rect = viewport?.getBoundingClientRect();
+  const screenBounds = worldBoundsToScreen(
+    {
+      x: bounds.x,
+      y: bounds.y,
+      display_width: bounds.width,
+      display_height: bounds.height,
+    },
+    camera,
+  );
+  const viewportWidth = rect?.width || 800;
+  const left = clamp(screenBounds.left + screenBounds.width / 2 - 130, 12, Math.max(12, viewportWidth - 272));
+  const top = Math.max(12, screenBounds.top - 46);
+  return { left, top };
+}
+
+function layoutUpdates(action, items, primaryItem) {
+  if (items.length < 2) return [];
+
+  const bounds = getItemsBounds(items);
+  if (!bounds) return [];
+
+  if (action === "align-left") {
+    return items.map((item) => ({ id: item.id, x: normalizeNumber(bounds.x) }));
+  }
+
+  if (action === "align-center-x") {
+    const center = bounds.x + bounds.width / 2;
+    return items.map((item) => ({
+      id: item.id,
+      x: normalizeNumber(center - Number(item.display_width) / 2),
+    }));
+  }
+
+  if (action === "align-right") {
+    const right = bounds.x + bounds.width;
+    return items.map((item) => ({
+      id: item.id,
+      x: normalizeNumber(right - Number(item.display_width)),
+    }));
+  }
+
+  if (action === "align-top") {
+    return items.map((item) => ({ id: item.id, y: normalizeNumber(bounds.y) }));
+  }
+
+  if (action === "align-center-y") {
+    const center = bounds.y + bounds.height / 2;
+    return items.map((item) => ({
+      id: item.id,
+      y: normalizeNumber(center - Number(item.display_height) / 2),
+    }));
+  }
+
+  if (action === "align-bottom") {
+    const bottom = bounds.y + bounds.height;
+    return items.map((item) => ({
+      id: item.id,
+      y: normalizeNumber(bottom - Number(item.display_height)),
+    }));
+  }
+
+  if (action === "normalize-width" && primaryItem) {
+    const width = Math.max(MIN_OBJECT_SIZE, Number(primaryItem.display_width));
+    return items.map((item) => ({ id: item.id, display_width: normalizeNumber(width) }));
+  }
+
+  if (action === "normalize-height" && primaryItem) {
+    const height = Math.max(MIN_OBJECT_SIZE, Number(primaryItem.display_height));
+    return items.map((item) => ({ id: item.id, display_height: normalizeNumber(height) }));
+  }
+
+  if (action === "tidy-horizontal") return tidyUpdates(items, "horizontal");
+  if (action === "tidy-vertical") return tidyUpdates(items, "vertical");
+
+  return [];
+}
+
+function tidyUpdates(items, axis) {
+  if (items.length < 2) return [];
+
+  const horizontal = axis === "horizontal";
+  const sorted = [...items].sort((a, b) => {
+    const aCenter = Number(horizontal ? a.x : a.y) + Number(horizontal ? a.display_width : a.display_height) / 2;
+    const bCenter = Number(horizontal ? b.x : b.y) + Number(horizontal ? b.display_width : b.display_height) / 2;
+    return aCenter - bCenter;
+  });
+
+  const start = Math.min(...sorted.map((item) => Number(horizontal ? item.x : item.y)));
+  let cursor = start;
+
+  return sorted.map((item) => {
+    const update = horizontal
+      ? { id: item.id, x: normalizeNumber(cursor) }
+      : { id: item.id, y: normalizeNumber(cursor) };
+    cursor += Number(horizontal ? item.display_width : item.display_height) + TIDY_SPACE;
+    return update;
+  });
 }
 
 function normalizeNumber(value) {

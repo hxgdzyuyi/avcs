@@ -65,9 +65,22 @@ defmodule Avcs.Agent.CodexClient do
     )
   end
 
+  def run_turn_on(server, project, codex_thread_id, text, reference_paths, on_event, opts) do
+    call_server(
+      server,
+      {:run_turn, project, codex_thread_id, text, reference_paths, on_event, opts},
+      :infinity
+    )
+  end
+
   def list_models do
     timeout = Application.get_env(:avcs, :codex_model_list_timeout_ms, @model_list_timeout_ms)
     call_server(:list_models, timeout + @call_timeout_buffer_ms)
+  end
+
+  def list_models_on(server) do
+    timeout = Application.get_env(:avcs, :codex_model_list_timeout_ms, @model_list_timeout_ms)
+    call_server(server, :list_models, timeout + @call_timeout_buffer_ms)
   end
 
   def read_thread(codex_thread_id, opts \\ []) do
@@ -75,6 +88,45 @@ defmodule Avcs.Agent.CodexClient do
 
     call_server(
       {:read_thread, codex_thread_id, Keyword.get(opts, :include_turns, false), timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
+  def read_thread_on(server, codex_thread_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      server,
+      {:read_thread, codex_thread_id, Keyword.get(opts, :include_turns, false), timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
+  def steer_turn_on(server, text, reference_paths, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      server,
+      {:steer_turn, text, reference_paths, timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
+  def interrupt_turn(_project, _thread_id, _turn_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      {:interrupt_turn, timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
+  def interrupt_turn_on(server, _thread_id, _turn_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      server,
+      {:interrupt_turn, timeout},
       timeout + @call_timeout_buffer_ms
     )
   end
@@ -87,6 +139,15 @@ defmodule Avcs.Agent.CodexClient do
       server ->
         send(server, {:approval_response, payload})
         :ok
+    end
+  end
+
+  def respond_approval_on(server, payload) do
+    if is_pid(server) and Process.alive?(server) do
+      send(server, {:approval_response, payload})
+      :ok
+    else
+      {:error, :not_running}
     end
   end
 
@@ -137,6 +198,26 @@ defmodule Avcs.Agent.CodexClient do
     }
 
     {:noreply, begin_request(request, state)}
+  end
+
+  def handle_call({:steer_turn, text, reference_paths, timeout_ms}, from, state) do
+    request = %{
+      from: from,
+      text: text,
+      reference_paths: reference_paths,
+      timeout_ms: timeout_ms
+    }
+
+    {:noreply, begin_steer_request(request, state)}
+  end
+
+  def handle_call({:interrupt_turn, timeout_ms}, from, state) do
+    request = %{
+      from: from,
+      timeout_ms: timeout_ms
+    }
+
+    {:noreply, begin_interrupt_request(request, state)}
   end
 
   @impl true
@@ -273,6 +354,44 @@ defmodule Avcs.Agent.CodexClient do
 
   defp begin_request(request, state) do
     GenServer.reply(request.from, {:error, "Codex app-server is busy"})
+    state
+  end
+
+  defp begin_steer_request(
+         request,
+         %{active: %{kind: :run_turn, thread_id: thread_id} = active, port: port} = state
+       )
+       when is_binary(thread_id) and is_port(port) do
+    active = ensure_active_steer_state(active)
+
+    if codex_turn_id(active) do
+      send_turn_steer(request, active, state)
+    else
+      put_active(state, %{active | pending_steers: active.pending_steers ++ [request]})
+    end
+  end
+
+  defp begin_steer_request(request, state) do
+    GenServer.reply(request.from, {:error, "Codex turn is not active"})
+    state
+  end
+
+  defp begin_interrupt_request(
+         request,
+         %{active: %{kind: :run_turn, thread_id: thread_id} = active, port: port} = state
+       )
+       when is_binary(thread_id) and is_port(port) do
+    active = ensure_active_interrupt_state(active)
+
+    if codex_turn_id(active) do
+      send_turn_interrupt(request, active, state)
+    else
+      put_active(state, %{active | pending_interrupts: active.pending_interrupts ++ [request]})
+    end
+  end
+
+  defp begin_interrupt_request(request, state) do
+    GenServer.reply(request.from, {:error, "Codex turn is not active"})
     state
   end
 
@@ -430,6 +549,24 @@ defmodule Avcs.Agent.CodexClient do
       active[:refresh_request_id] == id ->
         finish_request({:ok, run_result(active)}, state)
 
+      steer = steer_request(active, id) ->
+        validate_notification(message)
+        GenServer.reply(steer.from, {:error, error_message(error)})
+        active.on_event.({:steer_error, id, error, message})
+
+        state
+        |> put_active(delete_steer_request(active, id))
+        |> reset_idle_timer()
+
+      interrupt = interrupt_request(active, id) ->
+        validate_notification(message)
+        GenServer.reply(interrupt.from, {:error, error_message(error)})
+        active.on_event.({:interrupt_error, id, error, message})
+
+        state
+        |> put_active(delete_interrupt_request(active, id))
+        |> reset_idle_timer()
+
       MapSet.member?(active.approval_request_ids, id) ->
         active.on_event.({:response_error, id, error, message})
 
@@ -504,6 +641,29 @@ defmodule Avcs.Agent.CodexClient do
         validate_result(:thread_read_response, message, "thread/read response")
         active = %{active | acc: put_thread_name(active.acc, thread_name_from_response(message))}
         finish_request({:ok, run_result(active)}, put_active(state, active))
+
+      steer = steer_request(active, id) ->
+        validate_result(:turn_steer_response, %{"result" => result}, "turn/steer response")
+        GenServer.reply(steer.from, {:ok, result})
+        active.on_event.({:steer_response, id, result, message})
+
+        state
+        |> put_active(delete_steer_request(active, id))
+        |> reset_idle_timer()
+
+      interrupt = interrupt_request(active, id) ->
+        validate_result(
+          :turn_interrupt_response,
+          %{"result" => result},
+          "turn/interrupt response"
+        )
+
+        GenServer.reply(interrupt.from, {:ok, result})
+        active.on_event.({:interrupt_response, id, result, message})
+
+        state
+        |> put_active(delete_interrupt_request(active, id))
+        |> reset_idle_timer()
 
       MapSet.member?(active.approval_request_ids, id) ->
         validate_result(
@@ -594,7 +754,10 @@ defmodule Avcs.Agent.CodexClient do
       |> put_codex_turn_id(turn["id"])
       |> Map.put(:phase, :turn_active)
 
-    put_active(state, active)
+    state
+    |> put_active(active)
+    |> flush_pending_steers()
+    |> flush_pending_interrupts()
   end
 
   defp handle_turn_notification(
@@ -664,8 +827,12 @@ defmodule Avcs.Agent.CodexClient do
 
       other ->
         error =
-          get_in(turn, ["error", "message"]) ||
-            "Codex turn ended with status #{inspect(other)}"
+          if other == "interrupted" do
+            :interrupted
+          else
+            get_in(turn, ["error", "message"]) ||
+              "Codex turn ended with status #{inspect(other)}"
+          end
 
         finish_request({:error, error}, state)
     end
@@ -753,9 +920,15 @@ defmodule Avcs.Agent.CodexClient do
         |> Map.put(:phase, :turn_active)
         |> put_timer(:idle, active.idle_timeout_ms)
 
-      put_active(state, active)
+      state
+      |> put_active(active)
+      |> flush_pending_steers()
+      |> flush_pending_interrupts()
     else
-      put_active(state, active)
+      state
+      |> put_active(active)
+      |> flush_pending_steers()
+      |> flush_pending_interrupts()
     end
   end
 
@@ -825,6 +998,10 @@ defmodule Avcs.Agent.CodexClient do
       turn_request_id: nil,
       refresh_request_id: nil,
       approval_request_ids: MapSet.new(),
+      pending_steers: [],
+      steer_requests: %{},
+      pending_interrupts: [],
+      interrupt_requests: %{},
       acc: %{
         assistant_text: "",
         items: [],
@@ -851,14 +1028,10 @@ defmodule Avcs.Agent.CodexClient do
   end
 
   defp send_turn_start(active, state) do
-    input =
-      [%{type: "text", text: avcs_prompt(active.text)}] ++
-        Enum.map(active.reference_paths, &%{type: "localImage", path: &1})
-
     params =
       compact(%{
         threadId: active.thread_id,
-        input: input,
+        input: turn_input(active.text, active.reference_paths),
         cwd: Avcs.Projects.folder_path(active.project),
         model: active.opts.model,
         effort: active.opts.effort,
@@ -883,6 +1056,64 @@ defmodule Avcs.Agent.CodexClient do
       |> put_timer(:idle, active.idle_timeout_ms)
 
     put_active(state, active)
+  end
+
+  defp send_turn_steer(request, active, state) do
+    params = %{
+      threadId: active.thread_id,
+      expectedTurnId: codex_turn_id(active),
+      input: turn_input(request.text, request.reference_paths)
+    }
+
+    validate_params(:turn_steer_params, params, "turn/steer params")
+
+    {id, state} = next_request_id(state)
+
+    send_json(state.port, %{
+      method: "turn/steer",
+      id: id,
+      params: params
+    })
+
+    active =
+      active
+      |> ensure_active_steer_state()
+      |> Map.update!(:steer_requests, &Map.put(&1, id, request))
+
+    active.on_event.({:steer_sent, id, params})
+
+    put_active(state, active)
+  end
+
+  defp send_turn_interrupt(request, active, state) do
+    params = %{
+      threadId: active.thread_id,
+      turnId: codex_turn_id(active)
+    }
+
+    validate_params(:turn_interrupt_params, params, "turn/interrupt params")
+
+    {id, state} = next_request_id(state)
+
+    send_json(state.port, %{
+      method: "turn/interrupt",
+      id: id,
+      params: params
+    })
+
+    active =
+      active
+      |> ensure_active_interrupt_state()
+      |> Map.update!(:interrupt_requests, &Map.put(&1, id, request))
+
+    active.on_event.({:interrupt_sent, id, params})
+
+    put_active(state, active)
+  end
+
+  defp turn_input(text, reference_paths) do
+    [%{type: "text", text: avcs_prompt(text)}] ++
+      Enum.map(reference_paths, &%{type: "localImage", path: &1})
   end
 
   defp start_thread_name_refresh(active, state) do
@@ -954,6 +1185,8 @@ defmodule Avcs.Agent.CodexClient do
 
   defp finish_request(result, state) do
     active = cancel_timer(state.active)
+    reply_pending_steers(active, result)
+    reply_pending_interrupts(active, result)
     GenServer.reply(active.from, result)
     %{state | active: nil, last_used: System.monotonic_time(:millisecond)}
   end
@@ -999,11 +1232,123 @@ defmodule Avcs.Agent.CodexClient do
 
   defp reset_idle_timer(state), do: state
 
+  defp flush_pending_steers(%{active: %{kind: :run_turn} = active} = state) do
+    active = ensure_active_steer_state(active)
+
+    case {codex_turn_id(active), active.pending_steers} do
+      {turn_id, [_ | _] = pending_steers} when is_binary(turn_id) and turn_id != "" ->
+        state = put_active(state, %{active | pending_steers: []})
+
+        Enum.reduce(pending_steers, state, fn request, acc_state ->
+          send_turn_steer(request, acc_state.active, acc_state)
+        end)
+
+      _other ->
+        put_active(state, active)
+    end
+  end
+
+  defp flush_pending_steers(state), do: state
+
+  defp flush_pending_interrupts(%{active: %{kind: :run_turn} = active} = state) do
+    active = ensure_active_interrupt_state(active)
+
+    case {codex_turn_id(active), active.pending_interrupts} do
+      {turn_id, [_ | _] = pending_interrupts} when is_binary(turn_id) and turn_id != "" ->
+        state = put_active(state, %{active | pending_interrupts: []})
+
+        Enum.reduce(pending_interrupts, state, fn request, acc_state ->
+          send_turn_interrupt(request, acc_state.active, acc_state)
+        end)
+
+      _other ->
+        put_active(state, active)
+    end
+  end
+
+  defp flush_pending_interrupts(state), do: state
+
+  defp steer_request(active, id) do
+    active
+    |> Map.get(:steer_requests, %{})
+    |> Map.get(id)
+  end
+
+  defp delete_steer_request(active, id) do
+    active
+    |> ensure_active_steer_state()
+    |> Map.update!(:steer_requests, &Map.delete(&1, id))
+  end
+
+  defp ensure_active_steer_state(active) do
+    active
+    |> Map.put_new(:pending_steers, [])
+    |> Map.put_new(:steer_requests, %{})
+  end
+
+  defp interrupt_request(active, id) do
+    active
+    |> Map.get(:interrupt_requests, %{})
+    |> Map.get(id)
+  end
+
+  defp delete_interrupt_request(active, id) do
+    active
+    |> ensure_active_interrupt_state()
+    |> Map.update!(:interrupt_requests, &Map.delete(&1, id))
+  end
+
+  defp ensure_active_interrupt_state(active) do
+    active
+    |> Map.put_new(:pending_interrupts, [])
+    |> Map.put_new(:interrupt_requests, %{})
+  end
+
+  defp reply_pending_steers(%{kind: :run_turn} = active, result) do
+    active = ensure_active_steer_state(active)
+    error = steer_finish_error(result)
+
+    active.pending_steers
+    |> Enum.each(&GenServer.reply(&1.from, error))
+
+    active.steer_requests
+    |> Map.values()
+    |> Enum.each(&GenServer.reply(&1.from, error))
+  end
+
+  defp reply_pending_steers(_active, _result), do: :ok
+
+  defp steer_finish_error({:error, reason}), do: {:error, reason}
+  defp steer_finish_error(_result), do: {:error, "Codex turn is no longer active"}
+
+  defp reply_pending_interrupts(%{kind: :run_turn} = active, result) do
+    active = ensure_active_interrupt_state(active)
+    error = interrupt_finish_error(result)
+
+    active.pending_interrupts
+    |> Enum.each(&GenServer.reply(&1.from, error))
+
+    active.interrupt_requests
+    |> Map.values()
+    |> Enum.each(&GenServer.reply(&1.from, error))
+  end
+
+  defp reply_pending_interrupts(_active, _result), do: :ok
+
+  defp interrupt_finish_error({:error, :interrupted}), do: {:ok, %{}}
+  defp interrupt_finish_error({:error, reason}), do: {:error, reason}
+  defp interrupt_finish_error(_result), do: {:error, "Codex turn is no longer active"}
+
   defp put_codex_turn_id(active, turn_id) when is_binary(turn_id) and turn_id != "" do
     %{active | acc: %{active.acc | codex_turn_id: turn_id}}
   end
 
   defp put_codex_turn_id(active, _turn_id), do: active
+
+  defp codex_turn_id(%{acc: %{codex_turn_id: turn_id}}) when is_binary(turn_id) and turn_id != "",
+    do: turn_id
+
+  defp codex_turn_id(_active), do: nil
 
   defp schedule_timeout(timeout_ms) do
     timer_ref = make_ref()
@@ -1206,15 +1551,19 @@ defmodule Avcs.Agent.CodexClient do
         {:error, "Codex app-server worker is not running"}
 
       server ->
-        try do
-          GenServer.call(server, request, timeout)
-        catch
-          :exit, {:timeout, _call} ->
-            {:error, "Codex app-server timed out"}
+        call_server(server, request, timeout)
+    end
+  end
 
-          :exit, reason ->
-            {:error, "Codex app-server worker exited: #{inspect(reason)}"}
-        end
+  defp call_server(server, request, timeout) do
+    try do
+      GenServer.call(server, request, timeout)
+    catch
+      :exit, {:timeout, _call} ->
+        {:error, "Codex app-server timed out"}
+
+      :exit, reason ->
+        {:error, "Codex app-server worker exited: #{inspect(reason)}"}
     end
   end
 

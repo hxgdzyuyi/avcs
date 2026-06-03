@@ -10,6 +10,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Settings,
   Trash2,
 } from "lucide-react";
 import IconButton from "../../components/IconButton.jsx";
@@ -37,6 +38,7 @@ export default function ProjectPane({
   onDeleteThread,
   onArchiveProject,
   onDeleteProject,
+  onOpenSettings,
   connectionState,
   agentRunning,
   runningThreadIds = [],
@@ -81,6 +83,9 @@ export default function ProjectPane({
         <strong>项目</strong>
         <div className="sidebar-header-actions">
           <span className={`connection-dot ${connectionState}`} title={`WebSocket ${connectionState}`} />
+          <IconButton label="全局设置" className="ghost" onClick={onOpenSettings}>
+            <Settings size={16} />
+          </IconButton>
           <div className="project-menu-wrap" data-project-menu-root>
             <IconButton
               label="更多项目操作"
@@ -183,7 +188,7 @@ export default function ProjectPane({
             const isUnavailable = entry.status && entry.status !== "available";
             const projectThreads = threadsByProjectId[entry.id] || [];
             const showAllThreads = showAllThreadProjectIds.includes(entry.id);
-            const visibleThreads = visibleProjectThreads(projectThreads, currentThreadId, showAllThreads);
+            const visibleThreads = visibleProjectThreads(projectThreads, showAllThreads);
             const hiddenThreadCount = Math.max(projectThreads.length - visibleThreads.length, 0);
 
             return (
@@ -349,12 +354,10 @@ export default function ProjectPane({
   );
 }
 
-function visibleProjectThreads(threads, currentThreadId, showAll) {
+function visibleProjectThreads(threads, showAll) {
   if (showAll || threads.length <= DEFAULT_THREAD_LIMIT) return threads;
 
-  const selected = threads.find((thread) => thread.id === currentThreadId);
-  const visible = selected ? [selected, ...threads.filter((thread) => thread.id !== currentThreadId)] : threads;
-  return visible.slice(0, DEFAULT_THREAD_LIMIT);
+  return threads.slice(0, DEFAULT_THREAD_LIMIT);
 }
 
 function projectStatusLabel(status) {

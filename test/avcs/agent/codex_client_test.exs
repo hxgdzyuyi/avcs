@@ -49,7 +49,7 @@ defmodule Avcs.Agent.CodexClientTest do
       File.rm_rf!(tmp_dir)
     end)
 
-    %{events_path: events_path, log_path: log_path, requests_path: requests_path}
+    %{events_path: events_path, log_path: log_path, requests_path: requests_path, worker: worker}
   end
 
   test "list_models reuses the same app-server port process", %{log_path: log_path} do
@@ -169,6 +169,9 @@ defmodule Avcs.Agent.CodexClientTest do
     assert instructions =~ "当前项目输出目录：#{Path.expand(Avcs.Projects.output_dir(project))}"
     assert instructions =~ "当前 thread 中必须禁用系统 `imagegen` skill"
     assert instructions =~ "系统 `imagegen` skill 的触发条件是"
+    assert instructions =~ "不要将图片任务改写成 HTML/CSS/DOM/SVG/Canvas/WebGL 页面"
+    assert instructions =~ "不要通过 Chrome、Chromium、Playwright、Puppeteer"
+    assert instructions =~ "不要改用 HTML 排版或浏览器截图"
     assert instructions =~ "/skills/avcs-imagegen/SKILL.md"
     refute instructions =~ "{{project_path}}"
     refute instructions =~ "{{project_output_dir}}"
@@ -320,6 +323,95 @@ defmodule Avcs.Agent.CodexClientTest do
     assert_pid_dead(pid)
   end
 
+  test "steer_turn sends expected active turn params", %{
+    events_path: events_path,
+    requests_path: requests_path,
+    worker: worker
+  } do
+    System.put_env("AVCS_FAKE_CODEX_MODE", "hanging_turn")
+    project = open_test_project()
+    image_path = Path.join(Avcs.Projects.work_dir(project), "reference.png")
+    File.write!(image_path, "fake")
+
+    task =
+      Task.async(fn ->
+        Avcs.Agent.CodexClient.run_turn(project, nil, "Hang", [], fn _event -> :ok end, %{})
+      end)
+
+    wait_for_event(events_path, "hanging-turn")
+
+    assert {:ok, %{"turnId" => "turn-1"}} =
+             Avcs.Agent.CodexClient.steer_turn_on(worker, "Use this", [image_path])
+
+    wait_for_event(events_path, "turn-steer")
+
+    steer_request =
+      requests_path
+      |> read_requests!()
+      |> Enum.find(&(&1["method"] == "turn/steer"))
+
+    assert get_in(steer_request, ["params", "threadId"]) == "thread-1"
+    assert get_in(steer_request, ["params", "expectedTurnId"]) == "turn-1"
+    assert %{"type" => "text", "text" => text} = hd(get_in(steer_request, ["params", "input"]))
+    assert text =~ "Use this"
+    assert Enum.any?(get_in(steer_request, ["params", "input"]), &(&1["path"] == image_path))
+
+    assert :ok = stop_supervised(Avcs.Agent.CodexClient)
+    assert {:error, "Codex app-server stopped"} = Task.await(task, 1_000)
+  end
+
+  test "steer_turn rejection does not stop the active turn", %{
+    events_path: events_path,
+    worker: worker
+  } do
+    System.put_env("AVCS_FAKE_CODEX_MODE", "steer_reject")
+    project = open_test_project()
+
+    task =
+      Task.async(fn ->
+        Avcs.Agent.CodexClient.run_turn(project, nil, "Hang", [], fn _event -> :ok end, %{})
+      end)
+
+    wait_for_event(events_path, "hanging-turn")
+
+    assert {:error, "steer rejected"} =
+             Avcs.Agent.CodexClient.steer_turn_on(worker, "Rejected steer", [])
+
+    wait_for_event(events_path, "turn-steer")
+
+    assert :ok = stop_supervised(Avcs.Agent.CodexClient)
+    assert {:error, "Codex app-server stopped"} = Task.await(task, 1_000)
+  end
+
+  test "interrupt_turn sends active thread and turn ids", %{
+    events_path: events_path,
+    requests_path: requests_path,
+    worker: worker
+  } do
+    System.put_env("AVCS_FAKE_CODEX_MODE", "hanging_turn")
+    project = open_test_project()
+
+    task =
+      Task.async(fn ->
+        Avcs.Agent.CodexClient.run_turn(project, nil, "Hang", [], fn _event -> :ok end, %{})
+      end)
+
+    wait_for_event(events_path, "hanging-turn")
+
+    assert {:ok, %{}} = Avcs.Agent.CodexClient.interrupt_turn_on(worker, nil, nil)
+
+    wait_for_event(events_path, "turn-interrupt")
+
+    interrupt_request =
+      requests_path
+      |> read_requests!()
+      |> Enum.find(&(&1["method"] == "turn/interrupt"))
+
+    assert get_in(interrupt_request, ["params", "threadId"]) == "thread-1"
+    assert get_in(interrupt_request, ["params", "turnId"]) == "turn-1"
+    assert {:error, :interrupted} = Task.await(task, 1_000)
+  end
+
   test "stopping an idle client stops its app-server process", %{log_path: log_path} do
     assert {:ok, [%{"id" => "fake-model"}]} = Avcs.Agent.CodexClient.list_models()
     pid = read_logged_pid!(log_path)
@@ -434,7 +526,7 @@ defmodule Avcs.Agent.CodexClientTest do
             continue
           fi
           printf '%s\\n' "{\\"id\\":$id,\\"result\\":{\\"turn\\":{\\"id\\":\\"turn-1\\"}}}"
-          if [ "$mode" = "hanging_turn" ]; then
+          if [ "$mode" = "hanging_turn" ] || [ "$mode" = "steer_reject" ]; then
             event_log hanging-turn
             continue
           fi
@@ -460,6 +552,19 @@ defmodule Avcs.Agent.CodexClientTest do
           fi
           printf '%s\\n' "{\\"method\\":\\"item/agentMessage/delta\\",\\"params\\":{\\"delta\\":\\"Hello from fake Codex\\"}}"
           printf '%s\\n' "{\\"method\\":\\"turn/completed\\",\\"params\\":{\\"turn\\":{\\"id\\":\\"turn-1\\",\\"status\\":\\"completed\\"}}}"
+          ;;
+        *\\"method\\":\\"turn/steer\\"*)
+          event_log turn-steer
+          if [ "$mode" = "steer_reject" ]; then
+            printf '%s\\n' "{\\"id\\":$id,\\"error\\":{\\"code\\":-32000,\\"message\\":\\"steer rejected\\"}}"
+          else
+            printf '%s\\n' "{\\"id\\":$id,\\"result\\":{\\"turnId\\":\\"turn-1\\"}}"
+          fi
+          ;;
+        *\\"method\\":\\"turn/interrupt\\"*)
+          event_log turn-interrupt
+          printf '%s\\n' "{\\"id\\":$id,\\"result\\":{}}"
+          printf '%s\\n' "{\\"method\\":\\"turn/completed\\",\\"params\\":{\\"turn\\":{\\"id\\":\\"turn-1\\",\\"status\\":\\"interrupted\\"}}}"
           ;;
         *\\"method\\":\\"thread/read\\"*)
           event_log thread-read

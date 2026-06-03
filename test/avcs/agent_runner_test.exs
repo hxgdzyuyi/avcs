@@ -144,6 +144,12 @@ defmodule Avcs.Agent.RunnerTest do
     end
   end
 
+  defmodule InterruptedCodexClient do
+    def run_turn(_project, _codex_thread_id, _text, _reference_paths, _on_event, _settings) do
+      {:error, :interrupted}
+    end
+  end
+
   setup do
     previous_client = Application.get_env(:avcs, :codex_client)
     previous_codex_home = Application.get_env(:avcs, :codex_home)
@@ -215,6 +221,33 @@ defmodule Avcs.Agent.RunnerTest do
     assert approval_item["payload"]["review_id"] == "review-1"
     assert approval_item["payload"]["target_item_id"] == "tool-1"
     assert approval_item["payload"]["event"]["action"]["type"] == "command"
+  end
+
+  test "marks interrupted turns without creating an error item", %{project: project} do
+    Application.put_env(:avcs, :codex_client, InterruptedCodexClient)
+
+    {:ok, thread} = Avcs.Threads.create_thread(project, "Interrupted thread")
+    {:ok, created} = Avcs.Turns.create_user_turn(project, thread["id"], "Stop this", [])
+
+    {:ok, pid} =
+      Avcs.Agent.Runner.start(
+        project,
+        thread["id"],
+        created["turn"]["id"],
+        "Stop this",
+        []
+      )
+
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+
+    {:ok, [turn]} = Avcs.Turns.list_turns(project, thread["id"])
+    assert turn["status"] == "interrupted"
+    assert turn["completed_at"]
+    assert turn["error"] == "Stopped by user"
+
+    {:ok, items} = Avcs.Turns.list_items(project, thread["id"])
+    refute Enum.any?(items, &(&1["type"] == "error"))
   end
 
   test "persists completed image generation items without large result payload", %{

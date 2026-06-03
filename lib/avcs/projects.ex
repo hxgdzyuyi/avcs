@@ -5,7 +5,7 @@ defmodule Avcs.Projects do
 
   alias Avcs.Storage.SQLite
 
-  @schema_version "1"
+  @schema_version "2"
 
   def global_db_path do
     Application.get_env(:avcs, :global_db_path) ||
@@ -14,10 +14,32 @@ defmodule Avcs.Projects do
 
   def blank_projects_dir do
     Application.get_env(:avcs, :blank_projects_dir) ||
-      Path.join([System.user_home!(), "Documents", "Avcs"])
+      case Avcs.SiteSettings.get_setting("projects.default_root") do
+        {:ok, path} -> path
+        {:error, _reason} -> default_blank_projects_dir()
+      end
+  end
+
+  def default_blank_projects_dir do
+    Path.join([System.user_home!(), "Documents", "Avcs"])
   end
 
   def current_project, do: Avcs.Session.current_project()
+
+  def restore_last_opened_project do
+    with nil <- current_project(),
+         {:ok, true} <- Avcs.SiteSettings.get_setting("projects.restore_last_opened"),
+         {:ok, projects} <- list_projects(),
+         %{"id" => id} <- Enum.find(projects, &(&1["status"] == "available")) do
+      select_project(id)
+    else
+      %{} = project -> {:ok, project}
+      false -> {:ok, nil}
+      {:ok, false} -> {:ok, nil}
+      nil -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   def list_projects do
     with {:ok, _} <- migrate_global_db() do
@@ -101,6 +123,7 @@ defmodule Avcs.Projects do
       :ok = Avcs.Session.set_current_project(project)
       Avcs.Events.broadcast("project:updated", %{project: project})
       broadcast_projects_updated()
+      maybe_scan_project_on_open(project)
       {:ok, project}
     end
   end
@@ -118,6 +141,7 @@ defmodule Avcs.Projects do
 
       :ok = Avcs.Session.set_current_project(project)
       Avcs.Events.broadcast("project:updated", %{project: project})
+      maybe_scan_project_on_open(project)
       {:ok, project}
     end
   end
@@ -137,6 +161,7 @@ defmodule Avcs.Projects do
       );
       """)
 
+      Avcs.SiteSettings.ensure_table!(db)
       ensure_column(db, "projects", "archived_at", "TEXT")
     end)
   end
@@ -284,6 +309,34 @@ defmodule Avcs.Projects do
       %{"id" => ^id} -> Avcs.Session.set_current_project(nil)
       _project -> :ok
     end
+  end
+
+  defp maybe_scan_project_on_open(project) do
+    case Avcs.SiteSettings.get_setting("assets.scan_on_open") do
+      {:ok, true} ->
+        case Avcs.Assets.scan_project(project) do
+          {:ok, _assets} ->
+            broadcast_assets_and_board(project)
+
+          {:error, reason} ->
+            Avcs.Events.broadcast("error", %{
+              message: "Asset scan failed: #{to_string(reason)}"
+            })
+        end
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp broadcast_assets_and_board(project) do
+    with {:ok, assets} <- Avcs.Assets.list_assets(project),
+         {:ok, board_items} <- Avcs.Board.list_items(project) do
+      Avcs.Events.broadcast("assets:updated", %{items: assets})
+      Avcs.Events.broadcast("board:items", %{items: board_items})
+    end
+
+    :ok
   end
 
   defp ensure_column(db, table, column, definition) do
@@ -511,6 +564,23 @@ defmodule Avcs.Projects do
         FOREIGN KEY(asset_id) REFERENCES assets(id)
       );
 
+      CREATE TABLE IF NOT EXISTS trace_events (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT,
+        item_id TEXT,
+        codex_thread_id TEXT,
+        codex_turn_id TEXT,
+        codex_item_id TEXT,
+        status TEXT,
+        payload TEXT,
+        raw TEXT,
+        omitted TEXT,
+        created_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -518,9 +588,19 @@ defmodule Avcs.Projects do
       );
 
       CREATE INDEX IF NOT EXISTS idx_turns_thread_id ON turns(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_turns_thread_created_id
+        ON turns(thread_id, created_at, id);
       CREATE INDEX IF NOT EXISTS idx_items_thread_id ON items(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_items_turn_created_id
+        ON items(turn_id, created_at, id);
       CREATE INDEX IF NOT EXISTS idx_assets_thread_id ON assets(thread_id);
       CREATE INDEX IF NOT EXISTS idx_board_items_thread_id ON board_items(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_trace_events_thread_id
+        ON trace_events(thread_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_trace_events_turn_id
+        ON trace_events(turn_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_trace_events_codex_item_id
+        ON trace_events(codex_item_id, created_at);
       """)
 
       ensure_column(db, "threads", "status", "TEXT NOT NULL DEFAULT 'idle'")

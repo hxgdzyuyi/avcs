@@ -35,7 +35,7 @@
 
 MVP 建议覆盖：
 
-1. 新建空白项目：`POST /api/project/create_blank` 接收项目名 `{ "name": "Project Name" }`，在 `~/Documents/Avcs` 下创建不重名的项目文件夹，初始化 `<project>/.avcs/project.sqlite3`、`<project>/work/` 和 `<project>/output/`，并更新 `~/.avcs/avcs.sqlite3`。
+1. 新建空白项目：`POST /api/project/create_blank` 接收项目名 `{ "name": "Project Name" }`，在全局软件设置 `projects.default_root` 下创建不重名的项目文件夹，初始默认值为 `~/Documents/Avcs`，初始化 `<project>/.avcs/project.sqlite3`、`<project>/work/` 和 `<project>/output/`，并更新 `~/.avcs/avcs.sqlite3`。
 2. 打开或初始化现有项目文件夹：`POST /api/project/open` 接收本地绝对路径 `{ "path": "/absolute/project/folder" }`，创建或复用项目目录结构，并更新 `~/.avcs/avcs.sqlite3`。
 3. 导入图片：接收用户指定的本地图片路径，将文件复制到 `<project>/work/`，计算 hash 去重并写入项目 SQLite。
 4. 聊天区上传图片：接收浏览器 multipart 上传的图片文件，将文件保存到 `<project>/work/`，计算 hash 去重并写入项目 SQLite，返回可加入聊天输入区引用列表的 asset。
@@ -47,7 +47,7 @@ MVP 建议覆盖：
 
 文件 API 需要做路径规范化和权限边界校验。
 
-空白项目创建入口不接收完整本地路径，只接收项目名；后端固定在 `~/Documents/Avcs` 下创建项目目录。同名目录自动递增为 `<项目名> 2`、`<项目名> 3`。
+空白项目创建入口不接收完整本地路径，只接收项目名；后端在全局软件设置 `projects.default_root` 下创建项目目录，初始默认值为 `~/Documents/Avcs`。同名目录自动递增为 `<项目名> 2`、`<项目名> 3`。
 
 除打开项目和导入源文件的入口外，所有文件操作都必须限制在：
 
@@ -96,6 +96,6 @@ Vite 配置使用 `base: "/web/"`，构建开启 manifest，后端通过 manifes
 2. 所有本地文件操作都通过 Phoenix API 完成。
 3. API 响应符合统一响应信封。
 4. 图片预览通过受控 HTTP 路由返回。
-5. 新建空白项目固定创建到 `~/Documents/Avcs` 下，且同名目录自动递增。
+5. 新建空白项目创建到全局软件设置 `projects.default_root` 下，初始默认值为 `~/Documents/Avcs`，且同名目录自动递增。
 6. 除打开项目和导入源文件入口外，文件操作不能越过当前项目边界。
 7. 开发环境可以通过 `http://localhost:9500/web` 访问前端。

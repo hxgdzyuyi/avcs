@@ -39,12 +39,14 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 10. `board:items:list`：读取画板对象列表。
 11. `board:item:move`：更新画板对象位置。
 12. `board:item:resize`：更新画板对象显示尺寸。
+13. `board:items:update`：批量更新多个 output board item 的位置和显示尺寸，用于多选移动、对齐、统一尺寸和间距整理。
+14. `turn:stop`：停止当前 thread 的 active turn；queued turn 取消排队，已运行 turn 通过 Codex app-server `turn/interrupt` 中断。
 
 ## 4. Phoenix HTTP API 对应动作
 
 文件系统相关动作不走 WebSocket：
 
-1. `project:create_blank` 对应输入项目名，并在 `~/Documents/Avcs` 下创建不重名的空白项目文件夹。
+1. `project:create_blank` 对应输入项目名，并在全局软件设置 `projects.default_root` 下创建不重名的空白项目文件夹，初始默认值为 `~/Documents/Avcs`。
 2. `project:open_folder` 对应输入本地绝对路径，并打开或初始化现有项目文件夹。
 3. `assets:import` 对应导入图片。
 4. `assets:upload` 对应聊天区上传图片。
@@ -64,9 +66,12 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 9. `assets:updated`：资产列表更新。
 10. `board:item:created`：新增画板对象。
 11. `board:item:updated`：画板对象位置、尺寸或层级更新。
-12. `asset:referenced`：图片资产被加入当前聊天输入引用。
-13. `agent:run_completed`：Agent 运行完成。
-14. `error`：可恢复错误或失败状态。
+12. `board:items`：批量变更量较大时刷新当前画板对象列表。
+13. `asset:referenced`：图片资产被加入当前聊天输入引用。
+14. `agent:run_completed`：Agent 运行完成，`status` 可以是 `completed`、`failed` 或 `interrupted`。
+15. `error`：可恢复错误或失败状态。
+
+`board:items:update` 成功后，服务端对每个更新对象广播 `board:item:updated`，前端按 id 合并；一次批量操作超过 50 个对象时可额外广播 `board:items` 全量列表。
 
 ## 6. 状态与错误
 

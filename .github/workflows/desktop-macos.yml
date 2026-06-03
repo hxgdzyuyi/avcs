@@ -1,11 +1,22 @@
 name: Desktop macOS
 
 on:
+  push:
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "GitHub Release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    name: Build macOS Apple Silicon app
+    name: Build and release macOS Apple Silicon app
     runs-on: macos-15
 
     steps:
@@ -72,3 +83,50 @@ jobs:
           name: Avcs-macos-aarch64.app
           path: Avcs-macos-aarch64.app.zip
           if-no-files-found: error
+
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+          else
+            tag="${{ inputs.release_tag }}"
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          notes="$(cat <<EOF
+          macOS Apple Silicon build for ${tag}.
+
+          This app is not signed with an Apple Developer ID certificate and is not notarized.
+          EOF
+          )"
+
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --notes "$notes"
+          else
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              gh release create "$tag" --target "$GITHUB_SHA" --title "$tag" --notes "$notes" --draft
+            else
+              gh release create "$tag" --title "$tag" --notes "$notes" --draft
+            fi
+          fi
+
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          shasum -a 256 Avcs-macos-aarch64.app.zip > Avcs-macos-aarch64.app.zip.sha256
+          gh release upload "$tag" \
+            Avcs-macos-aarch64.app.zip \
+            Avcs-macos-aarch64.app.zip.sha256 \
+            --clobber

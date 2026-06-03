@@ -17,6 +17,25 @@ export default function TracingPage({
   onBack,
 }) {
   const [items, setItems] = useTracingItems(channel, project, threadId);
+  const [traceEvents, setTraceEvents] = useTraceEvents(channel, project, threadId);
+  const [activeView, setActiveView] = useState("timeline");
+  const [filters, setFilters] = useState({
+    query: "",
+    scope: "",
+    status: "",
+    eventName: "",
+  });
+  const events = useMemo(() => normalizeTraceEvents(traceEvents.data), [traceEvents.data]);
+  const filteredEvents = useMemo(() => filterTraceEvents(events, filters), [events, filters]);
+  const timelineGroups = useMemo(() => groupTimelineEvents(filteredEvents, threadId), [filteredEvents, threadId]);
+  const filterOptions = useMemo(() => traceFilterOptions(events), [events]);
+  const [selectedTimelineKey, setSelectedTimelineKey] = useStableTimelineSelection(timelineGroups);
+  const selectedTimelineEvent = selectedTimelineKey?.startsWith("event:")
+    ? filteredEvents.find((event) => timelineEventKey(event) === selectedTimelineKey) || null
+    : null;
+  const selectedTimelineGroup = selectedTimelineEvent
+    ? timelineGroups.find((group) => group.events.some((event) => event._rowKey === selectedTimelineEvent._rowKey)) || null
+    : timelineGroups.find((group) => timelineGroupKey(group) === selectedTimelineKey) || null;
   const turns = useMemo(() => groupTracingTurns(items.data), [items.data]);
   const [selectedTurnId, setSelectedTurnId] = useStableTurnSelection(turns);
   const [selectedItemId, setSelectedItemId] = useState(null);
@@ -28,17 +47,23 @@ export default function TracingPage({
   async function refreshTracing() {
     if (!canLoad) return;
     setItems({ status: "loading", error: "", data: items.data });
+    setTraceEvents({ status: "loading", error: "", data: traceEvents.data });
 
     try {
-      const data = await channel.push("thread:items:list", { thread_id: threadId });
-      setItems({ status: "loaded", error: "", data: data.items || [] });
+      const [itemData, eventData] = await Promise.all([
+        channel.push("thread:items:list", { thread_id: threadId }),
+        channel.push("trace:events:list", { thread_id: threadId }),
+      ]);
+      setItems({ status: "loaded", error: "", data: itemData.items || [] });
+      setTraceEvents({ status: "loaded", error: "", data: eventData.items || [] });
     } catch (error) {
       setItems({ status: "error", error: error.message, data: items.data });
+      setTraceEvents({ status: "error", error: error.message, data: traceEvents.data });
     }
   }
 
   useEffect(() => {
-    if (!selectedItemId || !selectedItemAnchorTick || !selectedTurnId) return;
+    if (activeView !== "snapshot" || !selectedItemId || !selectedItemAnchorTick || !selectedTurnId) return;
 
     const hasSelectedItem = turns.some(
       (turn) => turn.id === selectedTurnId && turn.items.some((item) => item.id === selectedItemId),
@@ -53,7 +78,20 @@ export default function TracingPage({
         behavior: "smooth",
       });
     });
-  }, [selectedItemId, selectedItemAnchorTick, selectedTurnId, turns]);
+  }, [activeView, selectedItemId, selectedItemAnchorTick, selectedTurnId, turns]);
+
+  useEffect(() => {
+    if (activeView !== "timeline" || !selectedTimelineKey) return;
+
+    window.requestAnimationFrame(() => {
+      const target = document.getElementById(`tracing-node-${selectedTimelineKey}`);
+      target?.scrollIntoView({
+        block: "center",
+        inline: "center",
+        behavior: "smooth",
+      });
+    });
+  }, [activeView, selectedTimelineKey]);
 
   return (
     <main className="tracing-page">
@@ -66,26 +104,63 @@ export default function TracingPage({
           <h1 title={thread?.title || threadId}>{thread?.title || `Thread ${shortId(threadId)}`}</h1>
         </div>
         <div className="tracing-header-actions">
+          <div className="segmented tracing-mode-switch" role="tablist" aria-label="Tracing view">
+            <button
+              className={activeView === "timeline" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={activeView === "timeline"}
+              onClick={() => setActiveView("timeline")}
+            >
+              Timeline
+            </button>
+            <button
+              className={activeView === "snapshot" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={activeView === "snapshot"}
+              onClick={() => setActiveView("snapshot")}
+            >
+              Snapshot
+            </button>
+          </div>
           <span className={`connection-dot ${connectionState}`} title={connectionState} />
-          <IconButton label="Refresh tracing" onClick={refreshTracing} disabled={!canLoad || items.status === "loading"}>
+          <IconButton
+            label="Refresh tracing"
+            onClick={refreshTracing}
+            disabled={!canLoad || items.status === "loading" || traceEvents.status === "loading"}
+          >
             <RefreshCcw size={16} />
           </IconButton>
         </div>
       </header>
 
       <div className="tracing-shell">
-        <aside className="tracing-tree-pane">
-          <div className="tracing-pane-heading">
-            <Workflow size={16} />
-            <strong>Turns</strong>
-            <span>{turns.length}</span>
-          </div>
-          <TracingTree
+        {activeView === "timeline" ? (
+          <TimelineView
+            status={traceEvents.status}
+            error={traceEvents.error}
+            project={project}
+            groups={timelineGroups}
+            totalEvents={events.length}
+            filteredCount={filteredEvents.length}
+            filters={filters}
+            filterOptions={filterOptions}
+            selectedTimelineKey={selectedTimelineKey}
+            selectedEvent={selectedTimelineEvent}
+            selectedGroup={selectedTimelineGroup}
+            onFiltersChange={setFilters}
+            onSelectTimeline={setSelectedTimelineKey}
+          />
+        ) : (
+          <SnapshotView
             status={items.status}
             error={items.error}
             project={project}
             turns={turns}
             selectedTurnId={selectedTurnId}
+            selectedTurn={selectedTurn}
+            selectedItemId={selectedItemId}
             onSelectTurn={(turnId) => {
               setSelectedTurnId(turnId);
               setSelectedItemId(null);
@@ -97,19 +172,7 @@ export default function TracingPage({
               setSelectedItemAnchorTick((current) => current + 1);
             }}
           />
-        </aside>
-
-        <section className="tracing-detail-pane">
-          {selectedTurn ? (
-            <TurnDetail turn={selectedTurn} selectedItemId={selectedItemId} />
-          ) : (
-            <div className="tracing-empty">
-              <TerminalSquare size={20} />
-              <strong>No turn selected</strong>
-              <span>{emptyDetailMessage(items.status, project)}</span>
-            </div>
-          )}
-        </section>
+        )}
       </div>
     </main>
   );
@@ -149,6 +212,40 @@ function useTracingItems(channel, project, threadId) {
   return [items, setItems];
 }
 
+function useTraceEvents(channel, project, threadId) {
+  const [events, setEvents] = useState({ status: "idle", error: "", data: [] });
+
+  useEffect(() => {
+    if (!threadId) {
+      setEvents({ status: "idle", error: "", data: [] });
+      return undefined;
+    }
+
+    if (!channel || !project) {
+      setEvents({ status: channel ? "idle" : "loading", error: "", data: [] });
+      return undefined;
+    }
+
+    let cancelled = false;
+    setEvents({ status: "loading", error: "", data: [] });
+
+    channel
+      .push("trace:events:list", { thread_id: threadId })
+      .then((data) => {
+        if (!cancelled) setEvents({ status: "loaded", error: "", data: data.items || [] });
+      })
+      .catch((error) => {
+        if (!cancelled) setEvents({ status: "error", error: error.message, data: [] });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [channel, project, threadId]);
+
+  return [events, setEvents];
+}
+
 function useStableTurnSelection(turns) {
   const [selectedTurnId, setSelectedTurnId] = useState(null);
 
@@ -164,6 +261,298 @@ function useStableTurnSelection(turns) {
   }, [selectedTurnId, turns]);
 
   return [selectedTurnId, setSelectedTurnId];
+}
+
+function useStableTimelineSelection(groups) {
+  const [selectedTimelineKey, setSelectedTimelineKey] = useState(null);
+
+  useEffect(() => {
+    if (groups.length === 0) {
+      setSelectedTimelineKey(null);
+      return;
+    }
+
+    if (!timelineSelectionExists(groups, selectedTimelineKey)) {
+      setSelectedTimelineKey(timelineGroupKey(groups[0]));
+    }
+  }, [selectedTimelineKey, groups]);
+
+  return [selectedTimelineKey, setSelectedTimelineKey];
+}
+
+function TimelineView({
+  status,
+  error,
+  project,
+  groups,
+  totalEvents,
+  filteredCount,
+  filters,
+  filterOptions,
+  selectedTimelineKey,
+  selectedEvent,
+  selectedGroup,
+  onFiltersChange,
+  onSelectTimeline,
+}) {
+  return (
+    <>
+      <aside className="tracing-tree-pane">
+        <div className="tracing-pane-heading">
+          <Workflow size={16} />
+          <strong>Events</strong>
+          <span>{filteredCount}/{totalEvents}</span>
+        </div>
+        <TracingFilters
+          filters={filters}
+          options={filterOptions}
+          disabled={!project || status === "loading"}
+          onChange={onFiltersChange}
+        />
+        <TimelineTree
+          status={status}
+          error={error}
+          project={project}
+          groups={groups}
+          totalEvents={totalEvents}
+          selectedTimelineKey={selectedTimelineKey}
+          onSelectTimeline={onSelectTimeline}
+        />
+      </aside>
+
+      <section className="tracing-detail-pane">
+        {selectedTimelineKey?.startsWith("group:") && selectedGroup ? (
+          <TimelineGroupDetail group={selectedGroup} />
+        ) : selectedEvent ? (
+          <EventDetail event={selectedEvent} />
+        ) : (
+          <div className="tracing-empty">
+            <TerminalSquare size={20} />
+            <strong>No event selected</strong>
+            <span>{emptyEventDetailMessage(status, project, totalEvents)}</span>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function SnapshotView({
+  status,
+  error,
+  project,
+  turns,
+  selectedTurnId,
+  selectedTurn,
+  selectedItemId,
+  onSelectTurn,
+  onSelectItem,
+}) {
+  return (
+    <>
+      <aside className="tracing-tree-pane">
+        <div className="tracing-pane-heading">
+          <Workflow size={16} />
+          <strong>Turns</strong>
+          <span>{turns.length}</span>
+        </div>
+        <TracingTree
+          status={status}
+          error={error}
+          project={project}
+          turns={turns}
+          selectedTurnId={selectedTurnId}
+          onSelectTurn={onSelectTurn}
+          onSelectItem={onSelectItem}
+        />
+      </aside>
+
+      <section className="tracing-detail-pane">
+        {selectedTurn ? (
+          <TurnDetail turn={selectedTurn} selectedItemId={selectedItemId} />
+        ) : (
+          <div className="tracing-empty">
+            <TerminalSquare size={20} />
+            <strong>No turn selected</strong>
+            <span>{emptyDetailMessage(status, project)}</span>
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+function TracingFilters({ filters, options, disabled, onChange }) {
+  const hasFilters = Boolean(filters.query || filters.scope || filters.status || filters.eventName);
+
+  function setFilter(key, value) {
+    onChange((current) => ({ ...current, [key]: value }));
+  }
+
+  function clearFilters() {
+    onChange({
+      query: "",
+      scope: "",
+      status: "",
+      eventName: "",
+    });
+  }
+
+  return (
+    <div className="tracing-filters" aria-label="Trace event filters">
+      <label>
+        <span>Search</span>
+        <input
+          type="search"
+          value={filters.query}
+          placeholder="IDs, event, JSON"
+          disabled={disabled}
+          onChange={(event) => setFilter("query", event.target.value)}
+        />
+      </label>
+      <label>
+        <span>Scope</span>
+        <select
+          value={filters.scope}
+          disabled={disabled}
+          onChange={(event) => setFilter("scope", event.target.value)}
+        >
+          <option value="">All scopes</option>
+          {options.scopes.map((scope) => (
+            <option value={scope} key={scope}>{scope}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span>Status</span>
+        <select
+          value={filters.status}
+          disabled={disabled}
+          onChange={(event) => setFilter("status", event.target.value)}
+        >
+          <option value="">All statuses</option>
+          {options.statuses.map((status) => (
+            <option value={status} key={status}>{status}</option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <span>Event</span>
+        <input
+          type="search"
+          value={filters.eventName}
+          placeholder="event_name"
+          disabled={disabled}
+          onChange={(event) => setFilter("eventName", event.target.value)}
+        />
+      </label>
+      <button type="button" className="tracing-filter-reset" disabled={disabled || !hasFilters} onClick={clearFilters}>
+        Reset
+      </button>
+    </div>
+  );
+}
+
+function TimelineTree({ status, error, project, groups, totalEvents, selectedTimelineKey, onSelectTimeline }) {
+  if (!project) {
+    return <div className="tracing-tree-empty">Open a project to view tracing.</div>;
+  }
+
+  if (status === "loading") {
+    return <div className="tracing-tree-empty">Loading trace events...</div>;
+  }
+
+  if (status === "error") {
+    return <div className="tracing-tree-empty error">{error || "Trace events load failed."}</div>;
+  }
+
+  if (totalEvents === 0) {
+    return <div className="tracing-tree-empty">No trace events found for this thread.</div>;
+  }
+
+  if (groups.length === 0) {
+    return <div className="tracing-tree-empty">No trace events match the current filters.</div>;
+  }
+
+  const threadGroups = groups.filter((group) => group.type === "thread");
+  const turnGroups = groups.filter((group) => group.type !== "thread");
+
+  return (
+    <div className="tracing-tree">
+      {threadGroups.length > 0 ? (
+        <div className="tracing-tree-section">
+          <div className="tracing-tree-section-title">Thread</div>
+          {threadGroups.map((group) => (
+            <TimelineGroupNode
+              key={group.id}
+              group={group}
+              selectedTimelineKey={selectedTimelineKey}
+              onSelectTimeline={onSelectTimeline}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {turnGroups.length > 0 ? (
+        <div className="tracing-tree-section">
+          <div className="tracing-tree-section-title">Turns</div>
+          {turnGroups.map((group, index) => (
+            <TimelineGroupNode
+              key={group.id}
+              group={group}
+              index={index}
+              selectedTimelineKey={selectedTimelineKey}
+              onSelectTimeline={onSelectTimeline}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TimelineGroupNode({ group, index = null, selectedTimelineKey, onSelectTimeline }) {
+  const groupKey = timelineGroupKey(group);
+  const selectedInGroup = selectedTimelineKey === groupKey ||
+    group.events.some((event) => timelineEventKey(event) === selectedTimelineKey);
+
+  return (
+    <div className="tracing-turn-node tracing-event-group">
+      <button
+        id={`tracing-node-${groupKey}`}
+        className={selectedInGroup ? "selected" : ""}
+        type="button"
+        onClick={() => onSelectTimeline(groupKey)}
+      >
+        <span className="tracing-node-index">{timelineGroupIndexLabel(group, index)}</span>
+        <span className="tracing-node-main">
+          <strong>{timelineGroupLabel(group, index)}</strong>
+          <small>{formatTime(group.createdAt)} · {group.events.length} events</small>
+        </span>
+        <span className={`turn-status ${group.status || ""}`}>{group.status || group.type}</span>
+      </button>
+
+      <div className="tracing-item-list tracing-event-item-list">
+        {group.events.map((event) => {
+          const eventKey = timelineEventKey(event);
+
+          return (
+            <button
+              type="button"
+              id={`tracing-node-${eventKey}`}
+              key={event._rowKey}
+              className={eventKey === selectedTimelineKey ? "selected" : ""}
+              onClick={() => onSelectTimeline(eventKey)}
+            >
+              <span className={`tracing-item-dot ${event.status || "completed"}`} />
+              <span>{event.event_name || "event"}</span>
+              <small>{[event.scope, event.status, formatTime(event.created_at)].filter(Boolean).join(" · ")}</small>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function TracingTree({ status, error, project, turns, selectedTurnId, onSelectTurn, onSelectItem }) {
@@ -258,7 +647,7 @@ function TurnDetail({ turn, selectedItemId }) {
 
       <section className="tracing-section">
         <h3>Items</h3>
-          <div className="tracing-detail-items">
+        <div className="tracing-detail-items">
           {turn.items.map((item, index) => {
             const output = aggregatedOutputForItem(item);
             const commandActions = commandActionsForItem(item);
@@ -281,15 +670,15 @@ function TurnDetail({ turn, selectedItemId }) {
                   <DetailField label="Created" value={formatTime(item.created_at)} />
                   <DetailField label="Updated" value={formatTime(item.updated_at)} />
                 </dl>
-              {commandActions.map((action, actionIndex) => (
-                <TextBlock
-                  key={`${actionIndex}-${action.command}`}
-                  label={commandActionLabel(action, actionIndex, commandActions.length)}
-                  meta={action.type || "command"}
-                  value={action.command}
-                  variant="command"
-                />
-              ))}
+                {commandActions.map((action, actionIndex) => (
+                  <TextBlock
+                    key={`${actionIndex}-${action.command}`}
+                    label={commandActionLabel(action, actionIndex, commandActions.length)}
+                    meta={action.type || "command"}
+                    value={action.command}
+                    variant="command"
+                  />
+                ))}
                 {output ? <TextBlock label="Aggregated Output" value={output} /> : null}
                 {item.content && item.content !== output ? (
                   <CodeBlockRenderer
@@ -309,34 +698,165 @@ function TurnDetail({ turn, selectedItemId }) {
   );
 }
 
+function TimelineGroupDetail({ group }) {
+  const [copied, setCopied] = useState(false);
+  const markdown = useMemo(() => timelineGroupMarkdown(group), [group]);
+  const lastEvent = group.events[group.events.length - 1] || null;
+
+  async function copyMarkdown() {
+    try {
+      await navigator.clipboard.writeText(markdown);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch (_error) {
+      setCopied(false);
+    }
+  }
+
+  return (
+    <div className="tracing-detail">
+      <header className="tracing-detail-header">
+        <div>
+          <span className="eyebrow">{group.type === "thread" ? "Thread Events" : "Turn Events"}</span>
+          <h2 title={group.turnId || group.threadId}>{timelineGroupLabel(group)}</h2>
+        </div>
+        <div className="tracing-detail-actions">
+          <span className={`turn-status ${group.status || ""}`}>{group.status || group.type}</span>
+          <IconButton label="Copy turn changes as Markdown" onClick={copyMarkdown}>
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+          </IconButton>
+        </div>
+      </header>
+
+      <section className="tracing-facts">
+        <Fact label="Thread ID" value={group.threadId} />
+        <Fact label="Turn ID" value={group.turnId} />
+        <Fact label="Events" value={group.events.length} />
+        <Fact label="First Event" value={formatTime(group.createdAt)} />
+        <Fact label="Last Event" value={formatTime(lastEvent?.created_at)} />
+        <Fact label="Status" value={group.status} />
+      </section>
+
+      <EventTimeline
+        title={group.type === "thread" ? "Thread Events" : "Turn Events"}
+        events={group.events}
+        emptyLabel="No trace events recorded for this group."
+      />
+    </div>
+  );
+}
+
+function EventDetail({ event }) {
+  const eventRow = publicEventRow(event);
+
+  return (
+    <div className="tracing-detail">
+      <header className="tracing-detail-header">
+        <div>
+          <span className="eyebrow">Trace Event</span>
+          <h2 title={event.event_name || event.id}>{event.event_name || "Trace event"}</h2>
+        </div>
+        <span className={`turn-status ${event.status || ""}`}>{event.status || "event"}</span>
+      </header>
+
+      <section className="tracing-facts">
+        <Fact label="Event ID" value={event.id} />
+        <Fact label="Scope" value={event.scope} />
+        <Fact label="Thread ID" value={event.thread_id} />
+        <Fact label="Turn ID" value={event.turn_id} />
+        <Fact label="Item ID" value={event.item_id} />
+        <Fact label="Created" value={formatTime(event.created_at)} />
+        <Fact label="Codex Thread" value={event.codex_thread_id} />
+        <Fact label="Codex Turn" value={event.codex_turn_id} />
+        <Fact label="Codex Item" value={event.codex_item_id} />
+      </section>
+
+      <section className="tracing-section">
+        <h3>Trace Event Row</h3>
+        <JsonBlock label="Complete row" value={eventRow} maxHeight={520} />
+      </section>
+
+      <section className="tracing-section">
+        <h3>Versioned Data</h3>
+        <div className="tracing-json-stack">
+          <JsonBlock label="Payload" value={event.payload} maxHeight={520} />
+          <JsonBlock label="Raw" value={event.raw} maxHeight={520} />
+          <JsonBlock label={`Omitted (${omittedCount(event.omitted)})`} value={event.omitted} maxHeight={320} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function EventTimeline({ title, events = [], emptyLabel, compact = false }) {
+  const Heading = compact ? "h4" : "h3";
+
+  return (
+    <section className={`tracing-events${compact ? " compact" : ""}`}>
+      <Heading>{title}</Heading>
+      {events.length === 0 ? (
+        <div className="tracing-events-empty">{emptyLabel}</div>
+      ) : (
+        <div className="tracing-event-list">
+          {events.map((event) => (
+            <article className="tracing-event" key={event._rowKey || event.id}>
+              <header>
+                <span className={`tracing-item-dot ${event.status || "completed"}`} />
+                <strong>{event.event_name || "event"}</strong>
+                <small>
+                  {[event.scope, event.status, formatTime(event.created_at)].filter(Boolean).join(" · ")}
+                </small>
+              </header>
+              <dl>
+                <DetailField label="ID" value={event.id} />
+                <DetailField label="Codex Item" value={event.codex_item_id} />
+                <DetailField label="Codex Turn" value={event.codex_turn_id} />
+              </dl>
+              {Array.isArray(event.omitted) && event.omitted.length > 0 ? (
+                <JsonBlock label={`Omitted (${event.omitted.length})`} value={event.omitted} />
+              ) : null}
+              {hasDisplayableJson(event.payload) ? <JsonBlock label="Payload" value={event.payload} /> : null}
+              {hasDisplayableJson(event.raw) ? <JsonBlock label="Raw" value={event.raw} /> : null}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Fact({ label, value }) {
+  const displayValue = displayScalar(value);
+
   return (
     <div>
       <span>{label}</span>
-      <strong title={value || "-"}>{value || "-"}</strong>
+      <strong title={displayValue}>{displayValue}</strong>
     </div>
   );
 }
 
 function DetailField({ label, value }) {
-  if (!value) return null;
+  if (isBlankValue(value)) return null;
+  const displayValue = displayScalar(value);
 
   return (
     <>
       <dt>{label}</dt>
-      <dd title={value}>{value}</dd>
+      <dd title={displayValue}>{displayValue}</dd>
     </>
   );
 }
 
-function JsonBlock({ label, value }) {
+function JsonBlock({ label, value, defaultOpen = true, maxHeight = 420 }) {
   return (
-    <details className="tracing-json" open>
+    <details className="tracing-json" open={defaultOpen}>
       <summary>{label}</summary>
       <CodeBlockRenderer
-        value={JSON.stringify(value, null, 2)}
+        value={stringifyJson(value)}
         language="json"
         className="tracing-json-code"
+        maxHeight={maxHeight}
       />
     </details>
   );
@@ -452,12 +972,12 @@ function parseMarkdownBlocks(value) {
       return;
     }
 
-      if (fence) {
-        flushParagraph();
-        flushList();
-        code = { language: (fence[1] || "").trim(), lines: [] };
-        return;
-      }
+    if (fence) {
+      flushParagraph();
+      flushList();
+      code = { language: (fence[1] || "").trim(), lines: [] };
+      return;
+    }
 
     if (!line.trim()) {
       flushParagraph();
@@ -657,10 +1177,230 @@ function renderStrongMarkdown(text, parentIndex) {
     });
 }
 
+function normalizeTraceEvents(events = []) {
+  if (!Array.isArray(events)) return [];
+
+  return events
+    .map((event, index) => {
+      const normalized = {
+        ...(event && typeof event === "object" ? event : {}),
+        id: stringField(event?.id),
+        scope: stringField(event?.scope),
+        event_name: stringField(event?.event_name),
+        thread_id: stringField(event?.thread_id),
+        turn_id: stringField(event?.turn_id),
+        item_id: stringField(event?.item_id),
+        codex_thread_id: stringField(event?.codex_thread_id),
+        codex_turn_id: stringField(event?.codex_turn_id),
+        codex_item_id: stringField(event?.codex_item_id),
+        status: stringField(event?.status),
+        payload: typeof event?.payload === "undefined" ? {} : event.payload,
+        raw: typeof event?.raw === "undefined" ? null : event.raw,
+        omitted: typeof event?.omitted === "undefined" ? [] : event.omitted,
+        created_at: stringField(event?.created_at),
+        _index: index,
+        _rowKey: stringField(event?.id) || `trace-event-${index}`,
+      };
+
+      normalized._searchText = traceEventSearchText(normalized);
+      return normalized;
+    })
+    .sort(compareTraceEvents);
+}
+
+function filterTraceEvents(events, filters) {
+  const query = normalizeSearch(filters.query);
+  const eventName = normalizeSearch(filters.eventName);
+
+  return events.filter((event) => {
+    if (filters.scope && event.scope !== filters.scope) return false;
+    if (filters.status && event.status !== filters.status) return false;
+    if (eventName && !normalizeSearch(event.event_name).includes(eventName)) return false;
+    if (query && !event._searchText.includes(query)) return false;
+    return true;
+  });
+}
+
+function traceFilterOptions(events) {
+  return {
+    scopes: uniqueSorted(events.map((event) => event.scope).filter(Boolean)),
+    statuses: uniqueSorted(events.map((event) => event.status).filter(Boolean)),
+  };
+}
+
+function groupTimelineEvents(events, threadId) {
+  const groups = new Map();
+
+  events.forEach((event) => {
+    const id = event.turn_id || `thread-${event.thread_id || threadId || "unknown"}`;
+    if (!groups.has(id)) {
+      groups.set(id, {
+        id,
+        type: event.turn_id ? "turn" : "thread",
+        threadId: event.thread_id || threadId || "",
+        turnId: event.turn_id || "",
+        status: event.status || "",
+        createdAt: event.created_at,
+        events: [],
+      });
+    }
+
+    const group = groups.get(id);
+    group.events.push(event);
+    group.status = event.status || group.status;
+    group.createdAt = earliestTime(group.createdAt, event.created_at);
+  });
+
+  return Array.from(groups.values()).sort((left, right) =>
+    compareNullableTime(left.createdAt, right.createdAt) || left.id.localeCompare(right.id),
+  );
+}
+
+function timelineGroupKey(group) {
+  return `group:${group.id}`;
+}
+
+function timelineEventKey(event) {
+  return `event:${event._rowKey}`;
+}
+
+function timelineSelectionExists(groups, selectedKey) {
+  if (!selectedKey) return false;
+
+  return groups.some((group) => {
+    if (timelineGroupKey(group) === selectedKey) return true;
+    return group.events.some((event) => timelineEventKey(event) === selectedKey);
+  });
+}
+
+function timelineGroupMarkdown(group) {
+  const lastEvent = group.events[group.events.length - 1] || null;
+  const heading = group.type === "thread" ? "Thread Events" : `Turn ${group.turnId || group.id}`;
+  const timelineRows = group.events.map((event, index) =>
+    [
+      index + 1,
+      markdownTableCell(event.created_at),
+      markdownTableCell(event.scope),
+      markdownTableCell(event.event_name),
+      markdownTableCell(event.status),
+      markdownTableCell(event.item_id),
+      markdownTableCell(event.codex_item_id),
+    ].join(" | "),
+  );
+
+  const eventRows = group.events.flatMap((event, index) => [
+    `### ${index + 1}. ${event.event_name || "event"}`,
+    "",
+    `- Event ID: ${event.id || "-"}`,
+    `- Created: ${event.created_at || "-"}`,
+    `- Scope: ${event.scope || "-"}`,
+    `- Status: ${event.status || "-"}`,
+    `- Item ID: ${event.item_id || "-"}`,
+    `- Codex Turn ID: ${event.codex_turn_id || "-"}`,
+    `- Codex Item ID: ${event.codex_item_id || "-"}`,
+    "",
+    "```json",
+    stringifyJson(publicEventRow(event)),
+    "```",
+    "",
+  ]);
+
+  return [
+    `# ${heading}`,
+    "",
+    "## Summary",
+    "",
+    `- Thread ID: ${group.threadId || "-"}`,
+    `- Turn ID: ${group.turnId || "-"}`,
+    `- Event count: ${group.events.length}`,
+    `- First event: ${group.createdAt || "-"}`,
+    `- Last event: ${lastEvent?.created_at || "-"}`,
+    `- Latest status: ${group.status || "-"}`,
+    "",
+    "## Timeline",
+    "",
+    "# | Created | Scope | Event | Status | Item ID | Codex Item ID",
+    "--- | --- | --- | --- | --- | --- | ---",
+    ...timelineRows,
+    "",
+    "## Event Rows",
+    "",
+    ...eventRows,
+  ].join("\n");
+}
+
+function markdownTableCell(value) {
+  return String(value || "-").replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+function traceEventSearchText(event) {
+  return normalizeSearch(
+    [
+      event.id,
+      event.scope,
+      event.event_name,
+      event.thread_id,
+      event.turn_id,
+      event.item_id,
+      event.codex_thread_id,
+      event.codex_turn_id,
+      event.codex_item_id,
+      event.status,
+      stringifyJson(event.payload),
+      stringifyJson(event.raw),
+      stringifyJson(event.omitted),
+      stringifyJson(publicEventRow(event)),
+    ].join("\n"),
+  );
+}
+
+function publicEventRow(event) {
+  return Object.fromEntries(
+    Object.entries(event || {}).filter(([key]) => !key.startsWith("_")),
+  );
+}
+
+function compareTraceEvents(left, right) {
+  return compareNullableTime(left.created_at, right.created_at) || left._index - right._index;
+}
+
+function compareNullableTime(left, right) {
+  const leftTime = Date.parse(left || "");
+  const rightTime = Date.parse(right || "");
+  const leftValid = !Number.isNaN(leftTime);
+  const rightValid = !Number.isNaN(rightTime);
+
+  if (leftValid && rightValid) return leftTime - rightTime;
+  if (leftValid) return -1;
+  if (rightValid) return 1;
+  return 0;
+}
+
+function earliestTime(left, right) {
+  if (!left) return right || "";
+  if (!right) return left || "";
+  return compareNullableTime(left, right) <= 0 ? left : right;
+}
+
+function uniqueSorted(values) {
+  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
+}
+
+function stringField(value) {
+  if (value === null || typeof value === "undefined") return "";
+  return typeof value === "string" ? value : String(value);
+}
+
+function normalizeSearch(value) {
+  return String(value || "").toLowerCase().trim();
+}
+
 function groupTracingTurns(items) {
   const groups = new Map();
 
-  items.forEach((item) => {
+  const itemList = Array.isArray(items) ? items : [];
+
+  [...itemList].sort(compareItems).forEach((item) => {
     const id = item.turn_id || `item-${item.id}`;
     if (!groups.has(id)) {
       groups.set(id, {
@@ -676,6 +1416,7 @@ function groupTracingTurns(items) {
         updatedAt: item.turn_updated_at || item.updated_at,
         completedAt: item.turn_completed_at || "",
         error: item.turn_error || "",
+        events: [],
         items: [],
       });
     }
@@ -683,13 +1424,30 @@ function groupTracingTurns(items) {
     groups.get(id).items.push(item);
   });
 
-  return Array.from(groups.values());
+  return Array.from(groups.values()).sort((left, right) =>
+    compareNullableTime(left.createdAt, right.createdAt) || left.id.localeCompare(right.id),
+  );
+}
+
+function compareItems(left, right) {
+  return compareNullableTime(left.created_at, right.created_at) || stringField(left.id).localeCompare(stringField(right.id));
 }
 
 function turnLabel(turn, index = null) {
   const prefix = index === null ? "Turn" : `Turn ${index + 1}`;
   if (turn.userText) return `${prefix}: ${truncateLine(turn.userText, 64)}`;
   return `${prefix} ${shortId(turn.id)}`;
+}
+
+function timelineGroupLabel(group, index = null) {
+  const prefix = group.type === "thread" ? "Thread Events" : index === null ? "Turn" : `Turn ${index + 1}`;
+  if (group.turnId) return `${prefix} ${shortId(group.turnId)}`;
+  return prefix;
+}
+
+function timelineGroupIndexLabel(group, index = null) {
+  if (group.type === "thread") return "T";
+  return index === null ? "-" : index + 1;
 }
 
 function shortId(id) {
@@ -717,6 +1475,39 @@ function formatTime(value) {
 
 function hasPayload(payload) {
   return Boolean(payload && typeof payload === "object" && Object.keys(payload).length > 0);
+}
+
+function hasDisplayableJson(value) {
+  if (value === null || typeof value === "undefined") return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") return Object.keys(value).length > 0;
+  return true;
+}
+
+function stringifyJson(value) {
+  if (typeof value === "undefined") return "undefined";
+
+  try {
+    const jsonValue = JSON.stringify(value, null, 2);
+    return typeof jsonValue === "string" ? jsonValue : String(value);
+  } catch (_error) {
+    return String(value);
+  }
+}
+
+function omittedCount(value) {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function displayScalar(value) {
+  if (isBlankValue(value)) return "-";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return stringifyJson(value);
+}
+
+function isBlankValue(value) {
+  return value === null || typeof value === "undefined" || value === "";
 }
 
 function aggregatedOutputForItem(item) {
@@ -755,4 +1546,13 @@ function emptyDetailMessage(status, project) {
   if (status === "loading") return "Tracing is loading.";
   if (status === "error") return "Tracing could not be loaded.";
   return "Select a turn in the tree.";
+}
+
+function emptyEventDetailMessage(status, project, totalEvents) {
+  if (!project) return "No project is selected.";
+  if (status === "loading") return "Trace events are loading.";
+  if (status === "error") return "Trace events could not be loaded.";
+  if (totalEvents === 0) return "No trace events are recorded for this thread.";
+  if (totalEvents > 0) return "No event matches the current filters.";
+  return "Select an event in the timeline.";
 }

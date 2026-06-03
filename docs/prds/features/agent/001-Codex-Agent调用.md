@@ -32,8 +32,11 @@ codex app-server
 4. 使用 `thread/start` 创建 Codex 会话。
 5. 需要继续同一 Codex 会话时使用 `thread/resume`。
 6. 用户发送消息时，通过 `turn/start` 传入 `threadId`、用户文本、聊天输入区当前引用的图片路径、当前项目 `cwd` 和必要运行设置。
-7. 持续读取 `thread/*`、`turn/*`、`item/*`、工具进度和错误通知。
-8. 将 Codex 输出转换为 Avcs 自己的 turn/item/asset 记录。
+7. 当前 thread 已有 active turn 且用户继续输入时，通过 `turn/steer` 把追加输入发送到 active turn，不创建新的 Avcs turn。
+8. 用户主动停止时，通过 `turn/interrupt` 发送 `threadId` 和 `turnId`；如果 Codex turn id 尚未返回，先记录 pending interrupt，拿到 id 后立即发送。
+9. queued turn 尚未分配 app-server worker 时，直接取消队列并把本地 turn 标记为 `interrupted`。
+10. 持续读取 `thread/*`、`turn/*`、`item/*`、工具进度和错误通知。
+11. 将 Codex 输出转换为 Avcs 自己的 turn/item/asset 记录。
 
 ## 4. 行为约束
 
@@ -49,7 +52,7 @@ codex app-server
 Codex app-server 输出需要映射到 Avcs：
 
 1. `thread/*` 映射到 thread 状态。
-2. `turn/*` 映射到 turn 生命周期。
+2. `turn/*` 映射到 turn 生命周期；Codex `interrupted` 映射为 Avcs `interrupted`，不按普通失败处理。
 3. `item/*` 映射到用户消息、Assistant 消息、工具调用、工具结果、图片资产和错误。
 4. 工具进度映射到聊天区工具状态行。
 5. 错误通知映射到当前 turn 的 error item 和前端 error 事件。
@@ -88,11 +91,15 @@ Schema 只用于 Elixir 后端开发期和测试期协议校验，不暴露给 R
 
 错误应写入当前 turn/item，并通过 WebSocket 推送给前端。
 
+用户主动 Stop 属于 `interrupted` 状态，不新增 error item，也不在前端显示为红色失败。
+
 ## 8. 验收标准
 
 1. 后端可以启动并持有 `codex app-server` 进程。
 2. 后端能完成 initialize / initialized 流程。
 3. 后端能通过 `thread/start` 或 `thread/resume` 管理 Codex 会话。
 4. 用户发送消息时，后端能通过 `turn/start` 传入文本、图片引用、项目 `cwd` 和必要设置。
-5. Agent 输出能写回项目 SQLite 的 turn/item。
-6. Avcs 不在内部实现独立大模型服务或自定义工具协议。
+5. 当前 thread 运行中追加输入时，后端能通过 `turn/steer` 发送到 active turn。
+6. 用户停止当前 turn 时，后端能通过 `turn/interrupt` 或 queued cancel 把本地 turn 收敛为 `interrupted`。
+7. Agent 输出能写回项目 SQLite 的 turn/item。
+8. Avcs 不在内部实现独立大模型服务或自定义工具协议。

@@ -5,6 +5,7 @@ defmodule Avcs.ProjectsTest do
 
   setup do
     previous_db_path = Application.get_env(:avcs, :global_db_path)
+    previous_blank_projects_dir = Application.get_env(:avcs, :blank_projects_dir)
 
     test_dir =
       Path.join(System.tmp_dir!(), "avcs-projects-test-#{System.unique_integer([:positive])}")
@@ -14,12 +15,19 @@ defmodule Avcs.ProjectsTest do
 
     File.rm_rf!(test_dir)
     Application.put_env(:avcs, :global_db_path, global_db_path)
+    Application.delete_env(:avcs, :blank_projects_dir)
 
     on_exit(fn ->
       if previous_db_path do
         Application.put_env(:avcs, :global_db_path, previous_db_path)
       else
         Application.delete_env(:avcs, :global_db_path)
+      end
+
+      if previous_blank_projects_dir do
+        Application.put_env(:avcs, :blank_projects_dir, previous_blank_projects_dir)
+      else
+        Application.delete_env(:avcs, :blank_projects_dir)
       end
 
       File.rm_rf!(test_dir)
@@ -84,6 +92,64 @@ defmodule Avcs.ProjectsTest do
 
     assert {:ok, selected} = Avcs.Projects.select_project(project["id"])
     assert selected["current_thread_id"] == nil
+  end
+
+  test "site settings persist registered global defaults and reject arbitrary keys", %{
+    global_db_path: global_db_path
+  } do
+    assert {:ok, "gpt-5.5"} = Avcs.SiteSettings.get_setting("agent.default_model")
+    assert {:ok, "medium"} = Avcs.SiteSettings.get_setting("agent.default_effort")
+
+    assert {:ok, data} =
+             Avcs.SiteSettings.update_settings(%{
+               "image.default_ratio" => "16:9",
+               "image.default_count" => 3,
+               "projects.default_root" => "~/Desktop/Avcs",
+               "assets.scan_on_open" => true
+             })
+
+    assert data.settings["image.default_ratio"] == "16:9"
+    assert data.settings["image.default_count"] == 3
+    assert data.settings["projects.default_root"] == Path.expand("~/Desktop/Avcs")
+    assert data.settings["assets.scan_on_open"] == true
+
+    assert item = Enum.find(data.items, &(&1.key == "image.default_ratio"))
+    assert item.is_default == false
+    assert item.default_value == "auto"
+
+    assert {:ok, "16:9"} = Avcs.SiteSettings.get_setting("image.default_ratio")
+
+    assert {:error, {:unknown_site_setting, "turns.default_model"}} =
+             Avcs.SiteSettings.update_settings(%{"turns.default_model" => "gpt-5"})
+
+    assert {:error, {:invalid_site_setting, "image.default_count"}} =
+             Avcs.SiteSettings.update_settings(%{"image.default_count" => 5})
+
+    assert {:ok, reset} = Avcs.SiteSettings.reset_setting("image.default_ratio")
+    assert reset.settings["image.default_ratio"] == "auto"
+
+    SQLite.with_db!(global_db_path, fn db ->
+      refute SQLite.one!(db, "SELECT * FROM app_settings WHERE key = ?", [
+               "image.default_ratio"
+             ])
+
+      assert SQLite.one!(db, "SELECT * FROM app_settings WHERE key = ?", [
+               "image.default_count"
+             ])
+    end)
+  end
+
+  test "blank projects use global default root when no application override is set", %{
+    projects_dir: projects_dir
+  } do
+    root = Path.join(projects_dir, "configured-root")
+
+    assert {:ok, _settings} =
+             Avcs.SiteSettings.update_settings(%{"projects.default_root" => root})
+
+    assert {:ok, project} = Avcs.Projects.create_blank_project("Global Root")
+    assert project["folder_path"] == Path.join(root, "Global Root")
+    assert File.exists?(Path.join([project["folder_path"], ".avcs", "project.sqlite3"]))
   end
 
   defp set_project_times(global_db_path, project, timestamp) do

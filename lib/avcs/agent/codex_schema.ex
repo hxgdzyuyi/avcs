@@ -26,9 +26,13 @@ defmodule Avcs.Agent.CodexSchema do
     thread_start_params: "v2/ThreadStartParams.json",
     thread_start_response: "v2/ThreadStartResponse.json",
     turn_completed_notification: "v2/TurnCompletedNotification.json",
+    turn_interrupt_params: "v2/TurnInterruptParams.json",
+    turn_interrupt_response: "v2/TurnInterruptResponse.json",
     turn_started_notification: "v2/TurnStartedNotification.json",
     turn_start_params: "v2/TurnStartParams.json",
-    turn_start_response: "v2/TurnStartResponse.json"
+    turn_start_response: "v2/TurnStartResponse.json",
+    turn_steer_params: "v2/TurnSteerParams.json",
+    turn_steer_response: "v2/TurnSteerResponse.json"
   }
 
   def schema_names, do: @schema_files |> Map.keys() |> Enum.sort()

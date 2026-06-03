@@ -16,7 +16,8 @@ defmodule Avcs.Application do
       {Phoenix.PubSub, name: Avcs.PubSub},
       Avcs.Session,
       {Registry, keys: :unique, name: Avcs.Agent.RunnerRegistry},
-      Avcs.Agent.CodexClient,
+      {DynamicSupervisor, strategy: :one_for_one, name: Avcs.Agent.CodexClientSupervisor},
+      Avcs.Agent.CodexAppServerPool,
       {Task.Supervisor, name: Avcs.Agent.TaskSupervisor},
       # Start to serve requests, typically the last entry
       AvcsWeb.Endpoint
