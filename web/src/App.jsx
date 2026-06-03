@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ProjectPane from "./features/projects/ProjectPane.jsx";
+import ProjectDbInfoDialog from "./features/projects/ProjectDbInfoDialog.jsx";
 import ChatPane from "./features/chat/ChatPane.jsx";
 import BoardPane from "./features/board/BoardPane.jsx";
 import TracingPage from "./features/tracing/TracingPage.jsx";
@@ -12,6 +13,8 @@ import {
   readAssetPath,
   revealAsset,
   scanAssets,
+  projectSqliteInfo as fetchProjectSqliteInfo,
+  projectSqliteMaintenance as runProjectSqliteMaintenance,
   uploadAsset,
 } from "./api.js";
 
@@ -72,6 +75,13 @@ export default function App() {
   const [expandedProjectIds, setExpandedProjectIds] = useState([]);
   const [showAllThreadProjectIds, setShowAllThreadProjectIds] = useState([]);
   const [collapsedLeftAndMiddle, setCollapsedLeftAndMiddle] = useState(false);
+  const [projectSqliteInfo, setProjectSqliteInfo] = useState(null);
+  const [projectSqliteInfoProjectId, setProjectSqliteInfoProjectId] =
+    useState(null);
+  const [projectSqliteInfoLoading, setProjectSqliteInfoLoading] = useState(false);
+  const [showProjectDbInfoDialog, setShowProjectDbInfoDialog] = useState(false);
+  const [projectSqliteMaintenanceByProject, setProjectSqliteMaintenanceByProject] =
+    useState({});
   const currentThreadIdRef = useRef(null);
   const draftThreadProjectIdRef = useRef(null);
   const projectIdRef = useRef(null);
@@ -801,6 +811,39 @@ export default function App() {
         setStreamingByTurn((current) => omitKey(current, payload.turn_id));
         markTurnStatus(payload.turn_id, payload.status || "completed");
       }
+      if (event === "project:sqlite:maintenance_started") {
+        setProjectSqliteMaintenanceByProject((current) => ({
+          ...current,
+          [payload.project_id]: {
+            ...payload,
+            status: payload.status || "running",
+          },
+        }));
+      }
+      if (event === "project:sqlite:maintenance_completed") {
+        const completedProjectId = payload.project_id;
+        const hasProjectDbInfo =
+          showProjectDbInfoDialog && projectSqliteInfoProjectId === completedProjectId;
+        setProjectSqliteMaintenanceByProject((current) => {
+          if (!completedProjectId) return current;
+          const next = { ...current };
+          delete next[completedProjectId];
+          return next;
+        });
+
+        if (hasProjectDbInfo) {
+          refreshProjectSqliteInfo(completedProjectId);
+        }
+
+        if (payload.success === false) {
+          const code = payload.details?.error_code || "project_sqlite_maintenance_failed";
+          const message =
+            payload.details?.error_message ||
+            payload.message ||
+            "数据库整理失败";
+          setNotice(`${code}: ${message}`);
+        }
+      }
       if (
         event === "error" &&
         belongsToCurrentThread(payload, currentThreadIdRef.current)
@@ -1099,6 +1142,11 @@ export default function App() {
     setRunningTurns({});
     setRepairingThreads({});
     setStreamingByTurn({});
+    setProjectSqliteInfo(null);
+    setProjectSqliteInfoProjectId(null);
+    setProjectSqliteMaintenanceByProject({});
+    setShowProjectDbInfoDialog(false);
+    setProjectSqliteInfoLoading(false);
   }
 
   async function handleToggleProjectExpanded(projectId) {

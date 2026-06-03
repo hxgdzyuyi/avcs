@@ -20,6 +20,8 @@ const EVENTS = [
   "board:item:created",
   "board:item:updated",
   "asset:referenced",
+  "project:sqlite:maintenance_started",
+  "project:sqlite:maintenance_completed",
   "agent:run_completed",
   "error",
 ];

@@ -60,3 +60,15 @@ export function deleteAsset(id) {
 export function previewUrl(asset) {
   return `/api/assets/${asset.id}/preview?v=${encodeURIComponent(asset.updated_at || "")}`;
 }
+
+export function projectSqliteInfo() {
+  return request("/api/project/sqlite_info");
+}
+
+export function projectSqliteMaintenance(action) {
+  return request("/api/project/sqlite_maintenance", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+}

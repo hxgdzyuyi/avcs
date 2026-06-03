@@ -8,6 +8,7 @@ import {
   FolderOpen,
   FolderPlus,
   MoreHorizontal,
+  Database,
   Pencil,
   Plus,
   Settings,
@@ -39,6 +40,7 @@ export default function ProjectPane({
   onArchiveProject,
   onArchiveProjectThreads,
   onDeleteProject,
+  onShowProjectDbInfo,
   onOpenSettings,
   connectionState,
   agentRunning,
@@ -202,6 +204,18 @@ export default function ProjectPane({
                       <div className="project-row-menu" role="menu">
                         <button
                           type="button"
+                          disabled={isUnavailable}
+                          onClick={() => {
+                            setActiveProjectMenuId(null);
+                            onShowProjectDbInfo?.(entry);
+                          }}
+                        >
+                          <Database size={15} />
+                          <span>数据库情况</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isUnavailable}
                           onClick={() => {
                             setActiveProjectMenuId(null);
                             onArchiveProject(entry);
