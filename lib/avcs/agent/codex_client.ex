@@ -14,6 +14,22 @@ defmodule Avcs.Agent.CodexClient do
   @os_process_kill_wait_ms 500
   @os_process_poll_ms 50
   @stdout_buffer_max_bytes 32 * 1024 * 1024
+  @codex_fallback_path_dirs [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ]
+  @codex_user_relative_candidates [
+    ".volta/bin/codex",
+    ".asdf/shims/codex",
+    ".local/bin/codex",
+    ".npm-global/bin/codex",
+    ".yarn/bin/codex",
+    ".bun/bin/codex"
+  ]
 
   def start_link(opts \\ []) do
     case Keyword.fetch(opts, :name) do
@@ -1673,13 +1689,14 @@ defmodule Avcs.Agent.CodexClient do
     inspect(preview, limit: 200, printable_limit: 200)
   end
 
-  defp start_port(codex) do
+  defp start_port(%{path: codex, env: env}) do
     port =
       Port.open({:spawn_executable, codex}, [
         :binary,
         :exit_status,
         {:line, 131_072},
-        {:args, ["app-server", "--listen", "stdio://"]}
+        {:args, ["app-server", "--listen", "stdio://"]},
+        {:env, port_env(env)}
       ])
 
     {:ok, port, port_os_pid(port)}
@@ -1695,22 +1712,132 @@ defmodule Avcs.Agent.CodexClient do
   end
 
   defp codex_executable do
-    case configured_codex_executable() do
+    case Enum.find(codex_executable_candidates(), &executable_file?/1) do
       nil ->
-        case System.find_executable("codex") do
-          nil -> {:error, "codex executable was not found in PATH"}
-          path -> {:ok, path}
-        end
+        {:error, "codex executable was not found in PATH or common install locations"}
 
       path ->
-        {:ok, path}
+        {:ok, %{path: path, env: [{"PATH", codex_child_path(path)}]}}
     end
   end
 
   defp configured_codex_executable do
+    configured =
+      :avcs
+      |> Application.get_env(:codex_executable)
+      |> clean_optional_string()
+
+    configured || clean_optional_string(System.get_env("AVCS_CODEX_EXECUTABLE"))
+  end
+
+  defp codex_executable_candidates do
+    [
+      resolve_executable_candidate(configured_codex_executable()),
+      System.find_executable("codex")
+      | configured_codex_search_candidates() ++ default_codex_search_candidates()
+    ]
+    |> List.flatten()
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp configured_codex_search_candidates do
     :avcs
-    |> Application.get_env(:codex_executable)
-    |> clean_optional_string()
+    |> Application.get_env(:codex_search_paths, [])
+    |> List.wrap()
+    |> Enum.flat_map(&codex_search_path_candidate/1)
+  end
+
+  defp codex_search_path_candidate(path) do
+    case clean_optional_string(path) do
+      nil ->
+        []
+
+      path ->
+        path = Path.expand(path)
+
+        if Path.basename(path) == "codex" do
+          [path]
+        else
+          [Path.join(path, "codex")]
+        end
+    end
+  end
+
+  defp default_codex_search_candidates do
+    user_candidates =
+      case user_home() do
+        nil ->
+          []
+
+        home ->
+          nvm_candidates =
+            Path.wildcard(Path.join([home, ".nvm", "versions", "node", "*", "bin", "codex"]))
+            |> Enum.sort_by(&nvm_version_sort_key/1, :desc)
+
+          relative_candidates =
+            Enum.map(@codex_user_relative_candidates, &Path.join(home, &1))
+
+          nvm_candidates ++ relative_candidates
+      end
+
+    user_candidates ++ Enum.map(@codex_fallback_path_dirs, &Path.join(&1, "codex"))
+  end
+
+  defp resolve_executable_candidate(nil), do: nil
+
+  defp resolve_executable_candidate(path) do
+    cond do
+      Path.type(path) == :absolute ->
+        path
+
+      String.contains?(path, "/") ->
+        Path.expand(path)
+
+      true ->
+        System.find_executable(path) || path
+    end
+  end
+
+  defp executable_file?(path) when is_binary(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      _other -> false
+    end
+  end
+
+  defp executable_file?(_path), do: false
+
+  defp nvm_version_sort_key(path) do
+    case Regex.run(~r{/node/v(\d+)\.(\d+)\.(\d+)/bin/codex$}, path) do
+      [_match, major, minor, patch] ->
+        {String.to_integer(major), String.to_integer(minor), String.to_integer(patch), path}
+
+      _other ->
+        {0, 0, 0, path}
+    end
+  end
+
+  defp codex_child_path(codex_path) do
+    existing_entries =
+      System.get_env("PATH", "")
+      |> String.split(":", trim: true)
+
+    [Path.dirname(codex_path) | @codex_fallback_path_dirs]
+    |> Kernel.++(existing_entries)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.join(":")
+  end
+
+  defp port_env(env) do
+    Enum.map(env, fn {key, value} -> {String.to_charlist(key), String.to_charlist(value)} end)
+  end
+
+  defp user_home do
+    clean_optional_string(System.get_env("HOME")) || System.user_home!()
+  rescue
+    _error -> nil
   end
 
   defp cleanup_os_process(os_pid) when is_integer(os_pid) do

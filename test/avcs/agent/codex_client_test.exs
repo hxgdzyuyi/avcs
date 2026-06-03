@@ -4,14 +4,19 @@ defmodule Avcs.Agent.CodexClientTest do
 
   setup do
     previous_executable = fetch_env(:codex_executable)
+    previous_search_paths = fetch_env(:codex_search_paths)
     previous_server = fetch_env(:codex_client_server)
     previous_validation = fetch_env(:codex_schema_validation)
     previous_request_timeout = fetch_env(:codex_request_timeout_ms)
     previous_idle_timeout = fetch_env(:codex_idle_timeout_ms)
+    previous_path = System.get_env("PATH")
+    previous_home = System.get_env("HOME")
+    previous_codex_executable_env = System.get_env("AVCS_CODEX_EXECUTABLE")
     previous_log = System.get_env("AVCS_FAKE_CODEX_LOG")
     previous_events = System.get_env("AVCS_FAKE_CODEX_EVENTS")
     previous_requests = System.get_env("AVCS_FAKE_CODEX_REQUESTS")
     previous_mode = System.get_env("AVCS_FAKE_CODEX_MODE")
+    previous_child_path_log = System.get_env("AVCS_FAKE_CODEX_CHILD_PATH_LOG")
 
     tmp_dir =
       Path.join(System.tmp_dir!(), "avcs-codex-client-#{System.unique_integer([:positive])}")
@@ -38,18 +43,30 @@ defmodule Avcs.Agent.CodexClientTest do
 
     on_exit(fn ->
       restore_env(:codex_executable, previous_executable)
+      restore_env(:codex_search_paths, previous_search_paths)
       restore_env(:codex_client_server, previous_server)
       restore_env(:codex_schema_validation, previous_validation)
       restore_env(:codex_request_timeout_ms, previous_request_timeout)
       restore_env(:codex_idle_timeout_ms, previous_idle_timeout)
+      restore_system_env("PATH", previous_path)
+      restore_system_env("HOME", previous_home)
+      restore_system_env("AVCS_CODEX_EXECUTABLE", previous_codex_executable_env)
       restore_system_env("AVCS_FAKE_CODEX_LOG", previous_log)
       restore_system_env("AVCS_FAKE_CODEX_EVENTS", previous_events)
       restore_system_env("AVCS_FAKE_CODEX_REQUESTS", previous_requests)
       restore_system_env("AVCS_FAKE_CODEX_MODE", previous_mode)
+      restore_system_env("AVCS_FAKE_CODEX_CHILD_PATH_LOG", previous_child_path_log)
       File.rm_rf!(tmp_dir)
     end)
 
-    %{events_path: events_path, log_path: log_path, requests_path: requests_path, worker: worker}
+    %{
+      events_path: events_path,
+      log_path: log_path,
+      requests_path: requests_path,
+      script_path: script_path,
+      tmp_dir: tmp_dir,
+      worker: worker
+    }
   end
 
   test "list_models reuses the same app-server port process", %{log_path: log_path} do
@@ -63,6 +80,34 @@ defmodule Avcs.Agent.CodexClientTest do
              |> Enum.uniq()
 
     assert pid != ""
+  end
+
+  test "list_models discovers codex from an nvm install outside the app PATH", %{
+    script_path: script_path,
+    tmp_dir: tmp_dir
+  } do
+    home = Path.join(tmp_dir, "home")
+    nvm_bin = Path.join([home, ".nvm", "versions", "node", "v22.18.0", "bin"])
+    discovered_codex = Path.join(nvm_bin, "codex")
+    child_path_log = Path.join(tmp_dir, "child-path.log")
+
+    File.mkdir_p!(nvm_bin)
+    File.cp!(script_path, discovered_codex)
+    File.chmod!(discovered_codex, 0o755)
+
+    Application.delete_env(:avcs, :codex_executable)
+    Application.delete_env(:avcs, :codex_search_paths)
+    System.delete_env("AVCS_CODEX_EXECUTABLE")
+    System.put_env("HOME", home)
+    System.put_env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    System.put_env("AVCS_FAKE_CODEX_CHILD_PATH_LOG", child_path_log)
+
+    assert {:ok, [%{"id" => "fake-model"}]} = Avcs.Agent.CodexClient.list_models()
+
+    assert child_path_log
+           |> File.read!()
+           |> String.split(":", trim: true)
+           |> List.first() == nvm_bin
   end
 
   test "run_turn is driven by app-server messages without restarting the port", %{
@@ -474,6 +519,10 @@ defmodule Avcs.Agent.CodexClientTest do
 
     if [ "$mode" = "ignore_term" ]; then
       trap '' TERM HUP INT
+    fi
+
+    if [ -n "$AVCS_FAKE_CODEX_CHILD_PATH_LOG" ]; then
+      printf '%s\\n' "$PATH" > "$AVCS_FAKE_CODEX_CHILD_PATH_LOG"
     fi
 
     printf '%s\\n' "$$" >> "$AVCS_FAKE_CODEX_LOG"

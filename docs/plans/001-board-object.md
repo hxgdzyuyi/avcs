@@ -1,6 +1,6 @@
 ---
 git_commit_message: 'board: plan image preview dialog'
-plan_state: finished
+plan_state: rendered
 ---
 # Board image preview dialog
 
