@@ -25,8 +25,9 @@ the settings page and `avcs://open?path=/absolute/project/folder` to
 `/web/?project_path=...`, where the browser app opens the project through the
 existing Phoenix API.
 
-The updater menu is wired to the Tauri updater runtime. A real update flow still
-requires release endpoint, public key, signing, and notarization configuration.
+The updater menu is present, but this development build does not initialize the
+Tauri updater runtime until a release endpoint, public key, signing, and
+notarization flow are configured.
 
 The app bundle is written to:
 

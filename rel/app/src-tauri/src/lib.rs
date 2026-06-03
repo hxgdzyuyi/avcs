@@ -10,8 +10,7 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-use tauri_plugin_updater::UpdaterExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
 #[cfg(target_os = "linux")]
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -33,7 +32,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let log_path = log_path();
             ensure_parent_dir(&log_path)?;
@@ -150,11 +148,6 @@ pub fn run() {
                 }
 
                 monitor_release(handle, child_slot, release_log_path);
-            });
-
-            let app_handle_for_updates = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = check_for_updates_on_boot(app_handle_for_updates).await;
             });
 
             Ok(())
@@ -497,69 +490,12 @@ fn normalize_open_url(input: &str) -> Option<String> {
     }
 }
 
-async fn check_for_updates_on_boot(app: AppHandle) -> tauri_plugin_updater::Result<()> {
-    if let Some(update) = app.updater()?.check().await? {
-        let should_install = app
-            .dialog()
-            .message(format!(
-                "Version {} is available.\n\nWould you like to download and install it now?",
-                update.version
-            ))
-            .kind(MessageDialogKind::Info)
-            .title("Update Available")
-            .buttons(MessageDialogButtons::OkCancel)
-            .blocking_show();
-
-        if should_install {
-            update.download_and_install(|_, _| {}, || {}).await?;
-            app.restart();
-        }
-    }
-
-    Ok(())
-}
-
 fn check_for_updates(app: AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = check_for_updates_async(app.clone()).await {
-            show_error_dialog(
-                &app,
-                "Update Check Failed",
-                format!("Failed to check for updates: {error}"),
-            );
-        }
-    });
-}
-
-async fn check_for_updates_async(app: AppHandle) -> tauri_plugin_updater::Result<()> {
-    if let Some(update) = app.updater()?.check().await? {
-        let should_install = app
-            .dialog()
-            .message(format!(
-                "Version {} is available.\n\nWould you like to download and install it now?",
-                update.version
-            ))
-            .kind(MessageDialogKind::Info)
-            .title("Update Available")
-            .buttons(MessageDialogButtons::OkCancel)
-            .blocking_show();
-
-        if should_install {
-            update.download_and_install(|_, _| {}, || {}).await?;
-            app.restart();
-        }
-    } else {
-        app.dialog()
-            .message(format!(
-                "You're running the latest version:\n\nv{}",
-                app.package_info().version
-            ))
-            .kind(MessageDialogKind::Info)
-            .title("No Updates Available")
-            .blocking_show();
-    }
-
-    Ok(())
+    app.dialog()
+        .message("Updates are not configured for this development build.")
+        .kind(MessageDialogKind::Info)
+        .title("Updates Not Configured")
+        .blocking_show();
 }
 
 fn log_path() -> PathBuf {
