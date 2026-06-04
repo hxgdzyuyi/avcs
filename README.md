@@ -2,6 +2,6 @@
 
 AI Visual Content Studio → Avcs
 
-## Assets
+## Usage
 
 ![使用说明](docs/assets/avcs-usage-guide.webp)
