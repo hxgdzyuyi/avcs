@@ -102,7 +102,11 @@ jobs:
           args+=("--sign" "${signing_identity}" "${app_path}")
           codesign "${args[@]}"
           codesign --verify --deep --strict "${app_path}"
-          spctl --assess --type execute "${app_path}"
+          if [ "${signing_identity}" != "-" ]; then
+            spctl --assess --type execute "${app_path}"
+          else
+            echo "Skip spctl assessment for ad-hoc signing identity."
+          fi
 
       - name: Zip app bundle
         shell: bash
