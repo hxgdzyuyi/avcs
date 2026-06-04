@@ -39,3 +39,5 @@ avcs-*.tar
 # Desktop app build artifacts
 /rel/app/src-tauri/rel-darwin/
 /rel/app/src-tauri/target/
+
+.DS_Store
