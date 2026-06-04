@@ -77,6 +77,20 @@ defmodule AvcsWeb.AvcsChannelTest do
     end
   end
 
+  defmodule BlockingModelsClient do
+    def list_models do
+      send(Application.fetch_env!(:avcs, :channel_test_pid), {:models_list_started, self()})
+
+      receive do
+        :finish_models ->
+          {:ok, [%{"id" => "fake-model"}]}
+      after
+        1_000 ->
+          {:error, "test timeout"}
+      end
+    end
+  end
+
   setup do
     previous_runner = Application.get_env(:avcs, :agent_runner)
     previous_client = Application.get_env(:avcs, :codex_client)
@@ -217,6 +231,23 @@ defmodule AvcsWeb.AvcsChannelTest do
     }
 
     assert reset_settings["image.default_count"] == 1
+  end
+
+  test "models list does not block later websocket requests", %{socket: socket} do
+    Application.put_env(:avcs, :codex_client, BlockingModelsClient)
+
+    models_ref = push(socket, "models:list", %{})
+    assert_receive {:models_list_started, models_pid}
+
+    create_ref = push(socket, "thread:create", %{"title" => "Selectable"})
+    assert_reply create_ref, :ok, %{success: true, data: thread}
+
+    select_ref = push(socket, "thread:select", %{"id" => thread["id"]})
+    assert_reply select_ref, :ok, %{success: true, data: %{current_thread_id: selected_id}}
+    assert selected_id == thread["id"]
+
+    send(models_pid, :finish_models)
+    assert_reply models_ref, :ok, %{success: true, data: %{items: [%{"id" => "fake-model"}]}}
   end
 
   test "message send titles an untitled thread from user text", %{
@@ -463,15 +494,77 @@ defmodule AvcsWeb.AvcsChannelTest do
       push(socket, "message:send", %{
         "thread_id" => thread["id"],
         "text" => "Use the reference",
-        "asset_ids" => [asset["id"]]
+        "asset_ids" => [asset["id"]],
+        "data_provider" => %{
+          "slug" => "avcs-data-prodiver-apod",
+          "name" => "NASA APOD",
+          "version" => "0.1.0",
+          "loaded" => true
+        }
       })
 
     assert_reply ref, :ok, %{success: true, data: %{"item" => item}}
     assert item["type"] == "user_message"
     assert item["payload"]["asset_ids"] == [asset["id"]]
+    assert item["payload"]["data_provider"]["slug"] == "avcs-data-prodiver-apod"
 
     {:ok, items} = Avcs.Turns.list_items(project, thread["id"])
     assert Enum.any?(items, &(&1["content"] == "Use the reference"))
+    assert [persisted] = Enum.filter(items, &(&1["type"] == "user_message"))
+    assert persisted["turn_data_provider"]["name"] == "NASA APOD"
+
+    {:ok, [turn]} = Avcs.Turns.list_turns(project, thread["id"])
+    assert turn["data_provider"]["slug"] == "avcs-data-prodiver-apod"
+  end
+
+  test "message:send rejects unloaded data provider payload", %{socket: socket} do
+    ref =
+      push(socket, "message:send", %{
+        "text" => "Use APOD",
+        "data_provider" => %{
+          "slug" => "avcs-data-prodiver-apod",
+          "name" => "NASA APOD",
+          "loaded" => false
+        }
+      })
+
+    assert_reply ref, :ok, %{
+      success: false,
+      error: %{code: "data_provider_not_loaded"}
+    }
+  end
+
+  test "message:send validates and persists visual mask edit payload", %{
+    project: project,
+    socket: socket
+  } do
+    {:ok, thread} = Avcs.Threads.ensure_default(project)
+    base_path = Path.join([project["folder_path"], "output", "base.png"])
+    mask_path = Path.join([project["folder_path"], ".avcs", "cache", "temp", "masks", "mask.png"])
+    File.mkdir_p!(Path.dirname(mask_path))
+    File.write!(base_path, test_png())
+    File.write!(mask_path, test_png_alt())
+    {:ok, base_asset} = Avcs.Assets.upsert_asset(project, base_path, source: "generated")
+    {:ok, mask_asset} = Avcs.Assets.upsert_asset(project, mask_path, source: "mask")
+
+    ref =
+      push(socket, "message:send", %{
+        "thread_id" => thread["id"],
+        "text" => "Replace the marked area",
+        "asset_ids" => [base_asset["id"], mask_asset["id"]],
+        "mask_edit" => %{
+          "mode" => "visual_reference",
+          "base_asset_id" => base_asset["id"],
+          "mask_asset_id" => mask_asset["id"],
+          "mask_semantics" => "white_edit_black_keep"
+        }
+      })
+
+    assert_reply ref, :ok, %{success: true, data: %{"item" => item}}
+    assert item["payload"]["asset_ids"] == [base_asset["id"], mask_asset["id"]]
+    assert item["payload"]["mask_edit"]["mode"] == "visual_reference"
+    assert item["payload"]["mask_edit"]["base_asset_id"] == base_asset["id"]
+    assert item["payload"]["mask_edit"]["mask_asset_id"] == mask_asset["id"]
   end
 
   test "thread:items:page returns turn windows and request ids", %{
@@ -622,13 +715,14 @@ defmodule AvcsWeb.AvcsChannelTest do
     ref =
       push(socket, "board:items:update", %{
         "items" => [
-          %{"id" => first["id"], "x" => 120, "y" => 80},
+          %{"id" => first["id"], "x" => 120, "y" => 80, "z_index" => 2},
           %{
             "id" => second["id"],
             "x" => 260,
             "y" => 90,
             "display_width" => 32,
-            "display_height" => 40
+            "display_height" => 40,
+            "z_index" => 1
           }
         ]
       })
@@ -639,8 +733,10 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert updated_second = Enum.find(items, &(&1["id"] == second["id"]))
     assert updated_first["x"] == 120.0
     assert updated_first["y"] == 80.0
+    assert updated_first["z_index"] == 2
     assert updated_second["display_width"] == 64.0
     assert updated_second["display_height"] == 64.0
+    assert updated_second["z_index"] == 1
 
     assert_push "board:item:updated", %{item: pushed_first}
     assert_push "board:item:updated", %{item: pushed_second}
@@ -663,6 +759,16 @@ defmodule AvcsWeb.AvcsChannelTest do
       })
 
     assert_reply invalid_ref, :ok, %{
+      success: false,
+      error: %{code: "invalid_board_item_update"}
+    }
+
+    invalid_z_index_ref =
+      push(socket, "board:items:update", %{
+        "items" => [%{"id" => item["id"], "z_index" => "2.5"}]
+      })
+
+    assert_reply invalid_z_index_ref, :ok, %{
       success: false,
       error: %{code: "invalid_board_item_update"}
     }

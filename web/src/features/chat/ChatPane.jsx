@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   AlertCircle,
+  BookOpen,
   Bot,
   Check,
   Copy,
@@ -22,6 +23,8 @@ import {
 import IconButton from "../../components/IconButton.jsx";
 import PromptEditor from "./PromptEditor.jsx";
 import { previewUrl } from "../../api.js";
+import apodProviderIcon from "../../../../priv/skills/avcs-data-prodiver-apod/assets/icon-small.png";
+import steamProviderIcon from "../../../../priv/skills/avcs-data-prodiver-steam/assets/icon-small.png";
 
 const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"];
 const SANDBOX_PRESETS = [
@@ -49,6 +52,20 @@ const IMAGE_RATIOS = [
   "3:4",
 ];
 const IMAGE_COUNTS = [1, 2, 3, 4];
+const DATA_PROVIDERS = [
+  {
+    slug: "avcs-data-prodiver-apod",
+    name: "NASA APOD",
+    version: "0.1.0",
+    icon: apodProviderIcon,
+  },
+  {
+    slug: "avcs-data-prodiver-steam",
+    name: "Steam Data Provider",
+    version: "0.1.0",
+    icon: steamProviderIcon,
+  },
+];
 
 export default function ChatPane({
   items,
@@ -81,9 +98,11 @@ export default function ChatPane({
   siteSettings,
   composerSettings,
   imageSettings,
+  selectedDataProvider,
   defaultImageSettings = DEFAULT_IMAGE_SETTINGS,
   onComposerSettingsChange,
   onImageSettingsChange,
+  onDataProviderChange,
   onApprovalRespond,
   onUpdateItem,
   onLoadEarlier,
@@ -92,7 +111,9 @@ export default function ChatPane({
 }) {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [imagePanelOpen, setImagePanelOpen] = useState(false);
+  const [providerPanelOpen, setProviderPanelOpen] = useState(false);
   const imagePanelRef = useRef(null);
+  const providerPanelRef = useRef(null);
   const listRef = useRef(null);
   const preserveAnchorRef = useRef(null);
   const referencedAssets = references
@@ -131,6 +152,10 @@ export default function ChatPane({
   );
   const imageSettingsActive = imageSettingsChanged(imageSettings);
   const imageSettingsLabel = imageSettingsSummary(imageSettings);
+  const dataProviderActive = Boolean(selectedDataProvider?.loaded);
+  const dataProviderLabel = dataProviderActive
+    ? `Data provider: ${selectedDataProvider.name} loaded`
+    : "Data provider";
   const canPageMessages =
     projectOpen &&
     connectionState === "online" &&
@@ -174,6 +199,26 @@ export default function ChatPane({
       document.removeEventListener("mousedown", closeOnOutsideClick);
     };
   }, [imagePanelOpen]);
+
+  useEffect(() => {
+    if (!providerPanelOpen) return undefined;
+
+    function closeOnEscape(event) {
+      if (event.key === "Escape") setProviderPanelOpen(false);
+    }
+
+    function closeOnOutsideClick(event) {
+      if (providerPanelRef.current?.contains(event.target)) return;
+      setProviderPanelOpen(false);
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+    };
+  }, [providerPanelOpen]);
 
   useEffect(() => {
     if (!pagination.scrollToBottomRequest || !listRef.current) return;
@@ -435,6 +480,19 @@ export default function ChatPane({
               ) : null}
             </span>
           ))}
+          {selectedDataProvider ? (
+            <span className="reference-chip provider-chip">
+              <img alt="" src={selectedDataProvider.icon} />
+              <span>已附加 {selectedDataProvider.name} 数据源</span>
+              <small>{selectedDataProvider.loaded ? "已加载" : "未加载"}</small>
+              <IconButton
+                label="Remove data provider"
+                onClick={() => onDataProviderChange?.(null)}
+              >
+                <X size={13} />
+              </IconButton>
+            </span>
+          ) : null}
         </div>
         <PromptEditor
           value={prompt}
@@ -461,6 +519,34 @@ export default function ChatPane({
             </label>
           </div>
           <div className="composer-right">
+            <div className="composer-data-provider-wrap" ref={providerPanelRef}>
+              <IconButton
+                label={dataProviderLabel}
+                className={`composer-data-provider-button${dataProviderActive ? " active" : ""}`}
+                onClick={() => setProviderPanelOpen((open) => !open)}
+                disabled={!projectOpen}
+              >
+                {dataProviderActive ? (
+                  <img alt="" src={selectedDataProvider.icon} />
+                ) : (
+                  <BookOpen size={16} />
+                )}
+              </IconButton>
+              {providerPanelOpen ? (
+                <ComposerDataProviderPanel
+                  providers={DATA_PROVIDERS}
+                  selectedProvider={selectedDataProvider}
+                  onSelect={(provider) => {
+                    onDataProviderChange?.({ ...provider, loaded: true });
+                    setProviderPanelOpen(false);
+                  }}
+                  onClear={() => {
+                    onDataProviderChange?.(null);
+                    setProviderPanelOpen(false);
+                  }}
+                />
+              ) : null}
+            </div>
             <div className="composer-image-settings-wrap" ref={imagePanelRef}>
               <IconButton
                 label={imageSettingsLabel}
@@ -522,6 +608,52 @@ export default function ChatPane({
         ) : null}
       </div>
     </main>
+  );
+}
+
+function ComposerDataProviderPanel({
+  providers,
+  selectedProvider,
+  onSelect,
+  onClear,
+}) {
+  return (
+    <section
+      className="composer-data-provider-panel"
+      aria-label="Data providers"
+    >
+      <div className="data-provider-list">
+        {providers.map((provider) => {
+          const selected = selectedProvider?.slug === provider.slug;
+
+          return (
+            <button
+              className={selected ? "selected" : ""}
+              type="button"
+              key={provider.slug}
+              onClick={() => onSelect(provider)}
+            >
+              <img alt="" src={provider.icon} />
+              <span>
+                <strong>{provider.name}</strong>
+                <small>{provider.slug}</small>
+              </span>
+              <em>{selected ? "Loaded" : "Load"}</em>
+            </button>
+          );
+        })}
+      </div>
+      {selectedProvider ? (
+        <button
+          className="data-provider-clear"
+          type="button"
+          onClick={onClear}
+        >
+          <X size={13} />
+          <span>Remove</span>
+        </button>
+      ) : null}
+    </section>
   );
 }
 
@@ -984,9 +1116,16 @@ function MessageBody({
 }
 
 function ReferencePreviewList({ assetIds, assets }) {
+  const visibleAssetIds = assetIds.filter((assetId) => {
+    const asset = assets.find((candidate) => candidate.id === assetId);
+    return asset?.source !== "mask";
+  });
+
+  if (visibleAssetIds.length === 0) return null;
+
   return (
     <div className="message-references">
-      {assetIds.map((assetId) => {
+      {visibleAssetIds.map((assetId) => {
         const asset = assets.find((candidate) => candidate.id === assetId);
 
         if (!asset) {

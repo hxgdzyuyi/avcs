@@ -7,7 +7,7 @@ defmodule Avcs.Turns do
   @max_page_limit 100
 
   def list_items(project, thread_id) do
-    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    with_project_db(project, fn db ->
       SQLite.all!(
         db,
         """
@@ -15,6 +15,7 @@ defmodule Avcs.Turns do
              , turns.model AS turn_model, turns.effort AS turn_effort
              , turns.approval_policy AS turn_approval_policy
              , turns.sandbox_mode AS turn_sandbox_mode
+             , turns.data_provider AS turn_data_provider
              , turns.created_at AS turn_created_at, turns.updated_at AS turn_updated_at
              , turns.completed_at AS turn_completed_at, turns.error AS turn_error
         FROM items
@@ -30,7 +31,7 @@ defmodule Avcs.Turns do
 
   def list_item_page(project, thread_id, opts \\ %{}) do
     with {:ok, page_opts} <- normalize_page_opts(opts) do
-      case SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+      case with_project_db(project, fn db ->
              do_list_item_page(db, thread_id, page_opts)
            end) do
         {:ok, {:error, _reason} = error} -> error
@@ -41,26 +42,32 @@ defmodule Avcs.Turns do
   end
 
   def create_user_turn(project, thread_id, text, reference_assets, opts \\ []) do
-    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    with_project_db(project, fn db ->
       SQLite.transaction!(db, fn ->
         now = Avcs.Time.now_iso()
         turn_id = Ecto.UUID.generate()
         item_id = Ecto.UUID.generate()
-        payload = Jason.encode!(%{asset_ids: reference_assets})
+
         model = attr(opts, :model)
         effort = attr(opts, :effort)
         approval_policy = attr(opts, :approval_policy) || "never"
         sandbox_mode = attr(opts, :sandbox_mode) || "workspace-write"
+        data_provider = attr(opts, :data_provider)
+        data_provider_payload = encode_optional_json(data_provider)
         status = attr(opts, :status) || "in_progress"
+
+        payload =
+          reference_payload(reference_assets, attr(opts, :mask_edit), data_provider)
+          |> Jason.encode!()
 
         SQLite.run!(
           db,
           """
           INSERT INTO turns (
             id, thread_id, status, user_text, model, effort, approval_policy,
-            sandbox_mode, created_at, updated_at
+            sandbox_mode, data_provider, created_at, updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
           [
             turn_id,
@@ -71,6 +78,7 @@ defmodule Avcs.Turns do
             effort,
             approval_policy,
             sandbox_mode,
+            data_provider_payload,
             now,
             now
           ]
@@ -118,7 +126,8 @@ defmodule Avcs.Turns do
               model: model,
               effort: effort,
               approval_policy: approval_policy,
-              sandbox_mode: sandbox_mode
+              sandbox_mode: sandbox_mode,
+              data_provider: data_provider
             }
           },
           db: db
@@ -144,7 +153,7 @@ defmodule Avcs.Turns do
         )
 
         %{
-          "turn" => SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn_id]),
+          "turn" => decode_turn(SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn_id])),
           "item" => decode_item(SQLite.one!(db, "SELECT * FROM items WHERE id = ?", [item_id]))
         }
       end)
@@ -152,7 +161,7 @@ defmodule Avcs.Turns do
   end
 
   def list_turns(project, thread_id) do
-    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    with_project_db(project, fn db ->
       SQLite.all!(
         db,
         """
@@ -163,17 +172,19 @@ defmodule Avcs.Turns do
         """,
         [thread_id]
       )
+      |> Enum.map(&decode_turn/1)
     end)
   end
 
   def get_turn(project, turn_id) do
-    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    with_project_db(project, fn db ->
       SQLite.one!(db, "SELECT * FROM turns WHERE id = ? LIMIT 1", [turn_id])
+      |> decode_turn()
     end)
   end
 
   def append_item(project, attrs) do
-    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    with_project_db(project, fn db ->
       now = Avcs.Time.now_iso()
       id = attr(attrs, :id) || Ecto.UUID.generate()
       type = attr(attrs, :type)
@@ -231,7 +242,7 @@ defmodule Avcs.Turns do
   end
 
   def upsert_codex_item(project, attrs) do
-    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    with_project_db(project, fn db ->
       SQLite.transaction!(db, fn ->
         now = Avcs.Time.now_iso()
         thread_id = attr(attrs, :thread_id)
@@ -342,7 +353,7 @@ defmodule Avcs.Turns do
   end
 
   def get_approval_item(project, thread_id, turn_id, review_id) do
-    case SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    case with_project_db(project, fn db ->
            db
            |> SQLite.one!(
              """
@@ -364,7 +375,7 @@ defmodule Avcs.Turns do
   end
 
   def update_item(project, id, attrs) do
-    case SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    case with_project_db(project, fn db ->
            SQLite.transaction!(db, fn ->
              existing =
                decode_item(SQLite.one!(db, "SELECT * FROM items WHERE id = ? LIMIT 1", [id]))
@@ -455,7 +466,7 @@ defmodule Avcs.Turns do
   end
 
   def update_turn_status(project, turn_id, status, codex_turn_id, error \\ nil) do
-    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+    with_project_db(project, fn db ->
       SQLite.transaction!(db, fn ->
         existing = SQLite.one!(db, "SELECT * FROM turns WHERE id = ? LIMIT 1", [turn_id])
         now = Avcs.Time.now_iso()
@@ -475,7 +486,7 @@ defmodule Avcs.Turns do
           [status, codex_turn_id, completed_at, error, now, turn_id]
         )
 
-        turn = SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn_id])
+        turn = decode_turn(SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn_id]))
 
         if trace_turn_update?(existing, turn, status, codex_turn_id, error) do
           Avcs.Trace.append_event(
@@ -837,6 +848,7 @@ defmodule Avcs.Turns do
            , turns.model AS turn_model, turns.effort AS turn_effort
            , turns.approval_policy AS turn_approval_policy
            , turns.sandbox_mode AS turn_sandbox_mode
+           , turns.data_provider AS turn_data_provider
            , turns.created_at AS turn_created_at, turns.updated_at AS turn_updated_at
            , turns.completed_at AS turn_completed_at, turns.error AS turn_error
       FROM items
@@ -873,6 +885,18 @@ defmodule Avcs.Turns do
     }
   end
 
+  defp reference_payload(reference_assets, nil, nil), do: %{asset_ids: reference_assets}
+
+  defp reference_payload(reference_assets, mask_edit, data_provider) do
+    %{asset_ids: reference_assets}
+    |> maybe_put_payload_value(:mask_edit, mask_edit)
+    |> maybe_put_payload_value(:data_provider, data_provider)
+  end
+
+  defp maybe_put_payload_value(payload, _key, nil), do: payload
+  defp maybe_put_payload_value(payload, _key, ""), do: payload
+  defp maybe_put_payload_value(payload, key, value), do: Map.put(payload, key, value)
+
   defp decode_item(nil), do: nil
 
   defp decode_item(item) do
@@ -883,13 +907,50 @@ defmodule Avcs.Turns do
         payload -> Jason.decode!(payload)
       end
 
-    Map.put(item, "payload", payload)
+    item
+    |> Map.put("payload", payload)
+    |> decode_embedded_json("turn_data_provider")
   end
+
+  defp decode_turn(nil), do: nil
+
+  defp decode_turn(turn) do
+    decode_embedded_json(turn, "data_provider")
+  end
+
+  defp decode_embedded_json(row, key) do
+    case Map.get(row, key) do
+      nil ->
+        row
+
+      "" ->
+        Map.put(row, key, nil)
+
+      value when is_binary(value) ->
+        case Jason.decode(value) do
+          {:ok, decoded} -> Map.put(row, key, decoded)
+          {:error, _reason} -> row
+        end
+
+      _value ->
+        row
+    end
+  end
+
+  defp encode_optional_json(nil), do: nil
+  defp encode_optional_json(""), do: nil
+  defp encode_optional_json(value), do: Jason.encode!(value)
 
   defp attr(attrs, key) when is_list(attrs), do: Keyword.get(attrs, key)
 
   defp attr(attrs, key) when is_map(attrs) do
     Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key))
+  end
+
+  defp with_project_db(project, fun) when is_function(fun, 1) do
+    with {:ok, _meta} <- Avcs.Projects.ensure_project_db(project) do
+      SQLite.with_db(Avcs.Projects.project_db_path(project), fun)
+    end
   end
 
   defp item_trace_snapshot(nil), do: nil

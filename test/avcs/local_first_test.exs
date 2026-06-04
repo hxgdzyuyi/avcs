@@ -100,6 +100,39 @@ defmodule Avcs.LocalFirstTest do
              Avcs.Board.update_items(project, [%{"id" => Ecto.UUID.generate(), "x" => 1}])
   end
 
+  test "batch board item updates persist z-index order", %{
+    project: project,
+    project_dir: project_dir
+  } do
+    File.write!(Path.join([project_dir, "output", "one.png"]), @png)
+    File.write!(Path.join([project_dir, "output", "two.png"]), @png_alt)
+    File.write!(Path.join([project_dir, "output", "three.gif"]), @gif)
+
+    assert {:ok, _scan_results} = Avcs.Assets.scan_project(project)
+    assert {:ok, [first, second, third]} = Avcs.Board.list_items(project)
+    assert Enum.map([first, second, third], & &1["z_index"]) == [1, 2, 3]
+
+    assert {:ok, updated} =
+             Avcs.Board.update_items(project, [
+               %{"id" => first["id"], "z_index" => 3},
+               %{"id" => second["id"], "z_index" => "1"},
+               %{"id" => third["id"], "z_index" => 2}
+             ])
+
+    assert Enum.map(updated, & &1["id"]) == [second["id"], third["id"], first["id"]]
+    assert Enum.map(updated, & &1["z_index"]) == [1, 2, 3]
+
+    assert {:ok, reopened} = Avcs.Projects.open_project(project_dir)
+    assert {:ok, persisted} = Avcs.Board.list_items(reopened)
+    assert Enum.map(persisted, & &1["id"]) == [second["id"], third["id"], first["id"]]
+
+    assert {:error, :invalid_board_item_update} =
+             Avcs.Board.update_items(project, [%{"id" => first["id"], "z_index" => "1.5"}])
+
+    assert {:error, :invalid_board_item_update} =
+             Avcs.Board.update_items(project, [%{"id" => first["id"], "z_index" => 0}])
+  end
+
   test "import and upload reuse an existing hash without copying another project file", %{
     project: project,
     project_dir: project_dir
@@ -186,6 +219,22 @@ defmodule Avcs.LocalFirstTest do
     assert {:ok, :ok} = Avcs.Threads.archive_thread(project, second["id"])
     assert {:ok, threads} = Avcs.Threads.list_threads(project)
     refute Enum.any?(threads, &(&1["id"] == second["id"]))
+  end
+
+  test "turn queries migrate legacy project sqlite missing data provider column", %{
+    project: project
+  } do
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Legacy data provider")
+    downgrade_turns_table_without_data_provider(project)
+
+    assert {:ok, []} = Avcs.Turns.list_items(project, thread["id"])
+    assert {:ok, info} = Avcs.Projects.project_sqlite_info(project)
+    assert info.sqlite_info.schema_version == "4"
+
+    assert {:ok, created} =
+             Avcs.Turns.create_user_turn(project, thread["id"], "After migration", [])
+
+    assert created["turn"]["data_provider"] == nil
   end
 
   test "turn item pages load latest, before, after, and around windows", %{
@@ -486,5 +535,39 @@ defmodule Avcs.LocalFirstTest do
              end)
 
     timestamp
+  end
+
+  defp downgrade_turns_table_without_data_provider(project) do
+    assert {:ok, :ok} =
+             Avcs.Storage.SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+               Avcs.Storage.SQLite.exec!(db, """
+               PRAGMA foreign_keys = OFF;
+               DROP TABLE turns;
+
+               CREATE TABLE turns (
+                 id TEXT PRIMARY KEY,
+                 thread_id TEXT NOT NULL,
+                 codex_turn_id TEXT,
+                 status TEXT NOT NULL,
+                 user_text TEXT,
+                 model TEXT,
+                 effort TEXT,
+                 approval_policy TEXT,
+                 sandbox_mode TEXT,
+                 completed_at TEXT,
+                 error TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 FOREIGN KEY(thread_id) REFERENCES threads(id)
+               );
+
+               UPDATE project_meta
+               SET value = '3', updated_at = '2026-06-01T00:00:00Z'
+               WHERE key = 'schema_version';
+               PRAGMA foreign_keys = ON;
+               """)
+
+               :ok
+             end)
   end
 end

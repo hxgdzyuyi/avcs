@@ -249,7 +249,12 @@ defmodule Avcs.Agent.CodexAppServerPool do
         state
 
       :busy ->
-        enqueue_request(request, state)
+        if queueable_request?(request) do
+          enqueue_request(request, state)
+        else
+          GenServer.reply(request.from, {:error, pool_busy_reason(request)})
+          state
+        end
     end
   end
 
@@ -258,6 +263,13 @@ defmodule Avcs.Agent.CodexAppServerPool do
     safe_event(request, {:pool_queued, %{position: :queue.len(state.waiting) + 1}})
     %{state | waiting: :queue.in(request, state.waiting)}
   end
+
+  defp queueable_request?(%{kind: :run_turn}), do: true
+  defp queueable_request?(_request), do: false
+
+  defp pool_busy_reason(%{kind: :list_models}), do: "Codex app-server workers are busy"
+  defp pool_busy_reason(%{kind: :read_thread}), do: "Codex app-server workers are busy"
+  defp pool_busy_reason(_request), do: "Codex app-server workers are busy"
 
   defp dispatch_waiting(state) do
     case :queue.out(state.waiting) do

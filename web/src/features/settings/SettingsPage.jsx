@@ -127,6 +127,7 @@ export default function SettingsPage({
   onSave,
   onReset,
   onBack,
+  onConfirm = async () => false,
 }) {
   const [activeGroup, setActiveGroup] = useState("agent");
   const [confirmed, setConfirmed] = useState(() =>
@@ -186,7 +187,15 @@ export default function SettingsPage({
   }
 
   async function handleResetKey(key) {
-    if (dirty && !window.confirm("Discard unsaved changes before resetting this setting?")) return;
+    if (dirty) {
+      const confirmed = await onConfirm({
+        title: "Discard changes?",
+        message: "Discard unsaved changes before resetting this setting?",
+        confirmLabel: "Discard",
+        tone: "danger",
+      });
+      if (!confirmed) return;
+    }
 
     setResettingKey(key);
     setError("");
@@ -200,8 +209,17 @@ export default function SettingsPage({
     }
   }
 
-  function handleBack() {
-    if (dirty && !window.confirm("Discard unsaved settings changes?")) return;
+  async function handleBack() {
+    if (dirty) {
+      const confirmed = await onConfirm({
+        title: "Discard settings changes?",
+        message: "Discard unsaved settings changes?",
+        confirmLabel: "Discard",
+        tone: "danger",
+      });
+      if (!confirmed) return;
+    }
+
     onBack();
   }
 

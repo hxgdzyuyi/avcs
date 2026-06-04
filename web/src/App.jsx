@@ -5,7 +5,14 @@ import ChatPane from "./features/chat/ChatPane.jsx";
 import BoardPane from "./features/board/BoardPane.jsx";
 import TracingPage from "./features/tracing/TracingPage.jsx";
 import SettingsPage from "./features/settings/SettingsPage.jsx";
+import ConfirmDialog from "./components/ConfirmDialog.jsx";
+import PromptDialog from "./components/PromptDialog.jsx";
+import ShortcutGuideDialog from "./components/ShortcutGuideDialog.jsx";
 import { createAvcsChannel } from "./socket/client.js";
+import {
+  isShortcutGuideShortcut,
+  shouldIgnoreGlobalShortcut,
+} from "./keyboard/shortcuts.js";
 import {
   createBlankProject,
   deleteAsset,
@@ -16,6 +23,7 @@ import {
   projectSqliteInfo as fetchProjectSqliteInfo,
   projectSqliteMaintenance as runProjectSqliteMaintenance,
   uploadAsset,
+  uploadMaskAsset,
 } from "./api.js";
 
 const SUPPORTED_REFERENCE_IMAGE_TYPES = new Set([
@@ -25,6 +33,7 @@ const SUPPORTED_REFERENCE_IMAGE_TYPES = new Set([
   "image/webp",
 ]);
 const MESSAGE_PAGE_LIMIT = 30;
+const THINKING_DOT_COUNT = 5;
 const DEFAULT_SITE_SETTINGS = {
   "agent.default_model": "gpt-5.5",
   "agent.default_effort": "medium",
@@ -59,6 +68,7 @@ export default function App() {
   const [pendingReferences, setPendingReferences] = useState([]);
   const [prompt, setPrompt] = useState("");
   const [runningTurns, setRunningTurns] = useState({});
+  const [agentThinking, setAgentThinking] = useState({ step: 0, lastAt: null });
   const [repairingThreads, setRepairingThreads] = useState({});
   const [streamingByTurn, setStreamingByTurn] = useState({});
   const [modelOptions, setModelOptions] = useState([]);
@@ -68,10 +78,13 @@ export default function App() {
     defaultComposerSettings(),
   );
   const [imageSettings, setImageSettings] = useState(defaultImageSettings());
+  const [selectedDataProvider, setSelectedDataProvider] = useState(null);
   const [selectedBoardIds, setSelectedBoardIds] = useState([]);
   const [boardFocusRequest, setBoardFocusRequest] = useState(null);
   const [mobileView, setMobileView] = useState("thread");
   const [notice, setNotice] = useState("");
+  const [confirmRequest, setConfirmRequest] = useState(null);
+  const [promptRequest, setPromptRequest] = useState(null);
   const [expandedProjectIds, setExpandedProjectIds] = useState([]);
   const [showAllThreadProjectIds, setShowAllThreadProjectIds] = useState([]);
   const [collapsedLeftAndMiddle, setCollapsedLeftAndMiddle] = useState(false);
@@ -80,11 +93,14 @@ export default function App() {
     useState(null);
   const [projectSqliteInfoLoading, setProjectSqliteInfoLoading] = useState(false);
   const [showProjectDbInfoDialog, setShowProjectDbInfoDialog] = useState(false);
+  const [showShortcutGuideDialog, setShowShortcutGuideDialog] = useState(false);
   const [projectSqliteMaintenanceByProject, setProjectSqliteMaintenanceByProject] =
     useState({});
   const currentThreadIdRef = useRef(null);
   const draftThreadProjectIdRef = useRef(null);
   const projectIdRef = useRef(null);
+  const projectSqliteInfoProjectIdRef = useRef(null);
+  const showProjectDbInfoDialogRef = useRef(false);
   const itemsRef = useRef([]);
   const messagePagingRef = useRef(messagePaging);
   const messagePageRequestsRef = useRef({});
@@ -92,12 +108,77 @@ export default function App() {
   const runningTurnsRef = useRef({});
   const isProjectRouteSyncRef = useRef(false);
   const linkedProjectOpenRef = useRef(false);
+  const emptyProjectPromptShownRef = useRef(false);
   const pendingReferencePreviewsRef = useRef(new Map());
   const settingsBackPathRef = useRef(null);
+  const confirmResolverRef = useRef(null);
+  const promptResolverRef = useRef(null);
+
+  const confirmAction = useCallback((options = {}) => {
+    if (confirmResolverRef.current) {
+      confirmResolverRef.current(false);
+    }
+
+    return new Promise((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmRequest({
+        title: "Confirm action",
+        message: "",
+        confirmLabel: "Confirm",
+        cancelLabel: "Cancel",
+        tone: "default",
+        ...options,
+      });
+    });
+  }, []);
+
+  const settleConfirm = useCallback((confirmed) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmRequest(null);
+    resolver?.(confirmed);
+  }, []);
+
+  const promptAction = useCallback((options = {}) => {
+    if (promptResolverRef.current) {
+      promptResolverRef.current(null);
+    }
+
+    return new Promise((resolve) => {
+      promptResolverRef.current = resolve;
+      setPromptRequest({
+        title: "Enter value",
+        label: "Value",
+        message: "",
+        initialValue: "",
+        confirmLabel: "Save",
+        cancelLabel: "Cancel",
+        required: true,
+        trimValue: true,
+        ...options,
+      });
+    });
+  }, []);
+
+  const settlePrompt = useCallback((value) => {
+    const resolver = promptResolverRef.current;
+    promptResolverRef.current = null;
+    setPromptRequest(null);
+    resolver?.(value);
+  }, []);
 
   useEffect(() => {
     currentThreadIdRef.current = currentThreadId;
   }, [currentThreadId]);
+
+  useEffect(() => {
+    return () => {
+      confirmResolverRef.current?.(false);
+      confirmResolverRef.current = null;
+      promptResolverRef.current?.(null);
+      promptResolverRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     draftThreadProjectIdRef.current = draftThreadProjectId;
@@ -106,6 +187,14 @@ export default function App() {
   useEffect(() => {
     projectIdRef.current = project?.id || null;
   }, [project?.id]);
+
+  useEffect(() => {
+    projectSqliteInfoProjectIdRef.current = projectSqliteInfoProjectId;
+  }, [projectSqliteInfoProjectId]);
+
+  useEffect(() => {
+    showProjectDbInfoDialogRef.current = showProjectDbInfoDialog;
+  }, [showProjectDbInfoDialog]);
 
   useEffect(() => {
     itemsRef.current = items;
@@ -120,9 +209,28 @@ export default function App() {
   }, [runningTurns]);
 
   useEffect(() => {
+    if (Object.keys(runningTurns).length === 0) {
+      setAgentThinking({ step: 0, lastAt: null });
+    }
+  }, [runningTurns]);
+
+  useEffect(() => {
     return () => {
       revokePendingReferencePreviews(pendingReferencePreviewsRef.current);
     };
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (!isShortcutGuideShortcut(event)) return;
+      if (shouldIgnoreGlobalShortcut(event)) return;
+
+      event.preventDefault();
+      setShowShortcutGuideDialog(true);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   useEffect(() => {
@@ -757,6 +865,20 @@ export default function App() {
           },
         }));
       }
+      if (event === "agent:thinking_tick") {
+        const activeTurn = runningTurnsRef.current[payload.thread_id];
+        if (
+          activeTurn?.turn_id &&
+          payload.turn_id &&
+          activeTurn.turn_id !== payload.turn_id
+        )
+          return;
+
+        setAgentThinking((current) => ({
+          step: (current.step + 1) % THINKING_DOT_COUNT,
+          lastAt: Date.now(),
+        }));
+      }
       if (event === "assistant:delta") {
         if (!belongsToCurrentThread(payload, currentThreadIdRef.current))
           return;
@@ -823,7 +945,8 @@ export default function App() {
       if (event === "project:sqlite:maintenance_completed") {
         const completedProjectId = payload.project_id;
         const hasProjectDbInfo =
-          showProjectDbInfoDialog && projectSqliteInfoProjectId === completedProjectId;
+          showProjectDbInfoDialogRef.current &&
+          projectSqliteInfoProjectIdRef.current === completedProjectId;
         setProjectSqliteMaintenanceByProject((current) => {
           if (!completedProjectId) return current;
           const next = { ...current };
@@ -880,7 +1003,7 @@ export default function App() {
         if (!cancelled) setModelOptions(data.items || []);
       })
       .catch((error) => {
-        if (!cancelled) setNotice(error.message);
+        if (!cancelled) console.warn("Unable to load Codex models", error);
       });
 
     return () => {
@@ -928,6 +1051,7 @@ export default function App() {
     setDraftProjectId(null);
     setPrompt("");
     setReferences([]);
+    setSelectedDataProvider(null);
     clearPendingReferences();
     try {
       const opened = await openProject(projectPath);
@@ -947,19 +1071,31 @@ export default function App() {
   }
 
   async function handleCreateBlankProject() {
-    const name = window.prompt("项目名称", "Untitled Project");
-    if (!name || !name.trim()) return;
+    const name = await promptAction({
+      title: "新建空白项目",
+      label: "项目名称",
+      initialValue: "Untitled Project",
+      confirmLabel: "创建",
+      cancelLabel: "取消",
+    });
+    if (!name) return;
+
+    await createBlankProjectFromName(name);
+  }
+
+  async function createBlankProjectFromName(name) {
     setNotice("");
-    setDraftProjectId(null);
     setPrompt("");
     setReferences([]);
+    setSelectedDataProvider(null);
     clearPendingReferences();
 
     try {
-      const created = await createBlankProject(name.trim());
+      const created = await createBlankProject(name);
       setProject(created);
       setProjects((current) => mergeById([created, ...current]));
       setProjectPath(created.folder_path || "");
+      setDraftProjectId(created.id || null);
       setSelectedBoardIds([]);
       if (created.id) {
         setExpandedProjectIds((current) =>
@@ -967,11 +1103,21 @@ export default function App() {
         );
       }
       await refreshProjects();
-      await refreshAll(created.current_thread_id, created);
+      await refreshAll(null, created);
     } catch (error) {
       setNotice(error.message);
     }
   }
+
+  useEffect(() => {
+    if (!channel || emptyProjectPromptShownRef.current) return;
+    if (project || projects.length > 0) return;
+    if (promptRequest || confirmRequest) return;
+    if (new URLSearchParams(window.location.search).get("project_path")) return;
+
+    emptyProjectPromptShownRef.current = true;
+    handleCreateBlankProject();
+  }, [channel, project, projects.length, promptRequest, confirmRequest]);
 
   async function handleSelectProject(projectId, { syncRoute = true } = {}) {
     if (!channel) return;
@@ -984,6 +1130,7 @@ export default function App() {
     setDraftProjectId(null);
     setPrompt("");
     setReferences([]);
+    setSelectedDataProvider(null);
     clearPendingReferences();
 
     if (projectId === project?.id) {
@@ -1028,10 +1175,13 @@ export default function App() {
 
   async function handleArchiveProject(projectEntry) {
     if (!channel || !projectEntry?.id) return;
-    if (
-      !window.confirm(`归档项目“${projectEntry.name}”？项目文件夹不会被删除。`)
-    )
-      return;
+    const confirmed = await confirmAction({
+      title: "归档项目",
+      message: `归档项目“${projectEntry.name}”？项目文件夹不会被删除。`,
+      confirmLabel: "归档",
+      cancelLabel: "取消",
+    });
+    if (!confirmed) return;
     setNotice("");
 
     try {
@@ -1047,12 +1197,13 @@ export default function App() {
 
   async function handleArchiveProjectThreads(projectEntry) {
     if (!channel || !projectEntry?.id) return;
-    if (
-      !window.confirm(
-        `归档项目“${projectEntry.name}”下的所有对话？项目本身不会被归档。`,
-      )
-    )
-      return;
+    const confirmed = await confirmAction({
+      title: "归档项目对话",
+      message: `归档项目“${projectEntry.name}”下的所有对话？项目本身不会被归档。`,
+      confirmLabel: "归档对话",
+      cancelLabel: "取消",
+    });
+    if (!confirmed) return;
     setNotice("");
 
     try {
@@ -1086,12 +1237,14 @@ export default function App() {
 
   async function handleDeleteProject(projectEntry) {
     if (!channel || !projectEntry?.id) return;
-    if (
-      !window.confirm(
-        `从项目列表删除“${projectEntry.name}”？这只会删除 SQLite 中的项目引用，不会删除文件夹。`,
-      )
-    )
-      return;
+    const confirmed = await confirmAction({
+      title: "删除项目引用",
+      message: `从项目列表删除“${projectEntry.name}”？这只会删除 SQLite 中的项目引用，不会删除文件夹。`,
+      confirmLabel: "删除引用",
+      cancelLabel: "取消",
+      tone: "danger",
+    });
+    if (!confirmed) return;
     setNotice("");
 
     try {
@@ -1101,6 +1254,80 @@ export default function App() {
       applyProjectRemoval(projectEntry.id, data.project);
       setNotice("项目引用已删除");
     } catch (error) {
+      setNotice(error.message);
+    }
+  }
+
+  async function handleShowProjectDbInfo(projectEntry) {
+    if (!projectEntry?.id) return;
+
+    setNotice("");
+    setProjectSqliteInfo(null);
+    setProjectSqliteInfoProjectId(projectEntry.id);
+    setShowProjectDbInfoDialog(true);
+
+    try {
+      if (projectEntry.id !== project?.id) {
+        await handleSelectProject(projectEntry.id);
+      }
+
+      await refreshProjectSqliteInfo(projectEntry.id);
+    } catch (error) {
+      setShowProjectDbInfoDialog(false);
+      setNotice(error.message);
+    }
+  }
+
+  async function refreshProjectSqliteInfo(projectId = projectSqliteInfoProjectId) {
+    setProjectSqliteInfoLoading(true);
+
+    try {
+      const info = await fetchProjectSqliteInfo();
+      setProjectSqliteInfo(info);
+      setProjectSqliteInfoProjectId(info?.project_id || projectId || null);
+      return info;
+    } catch (error) {
+      setNotice(error.message);
+      throw error;
+    } finally {
+      setProjectSqliteInfoLoading(false);
+    }
+  }
+
+  async function handleRunProjectSqliteMaintenance(action) {
+    const activeProjectId = projectSqliteInfoProjectId || project?.id;
+    if (!activeProjectId) return;
+
+    setNotice("");
+    setProjectSqliteMaintenanceByProject((current) => ({
+      ...current,
+      [activeProjectId]: {
+        project_id: activeProjectId,
+        action,
+        status: "running",
+      },
+    }));
+
+    try {
+      const result = await runProjectSqliteMaintenance(action);
+
+      if (result?.status === "completed") {
+        setProjectSqliteMaintenanceByProject((current) => omitKey(current, activeProjectId));
+        await refreshProjectSqliteInfo(activeProjectId);
+        return;
+      }
+
+      setProjectSqliteMaintenanceByProject((current) => ({
+        ...current,
+        [activeProjectId]: {
+          project_id: activeProjectId,
+          action,
+          job_id: result?.job_id,
+          status: result?.status || "running",
+        },
+      }));
+    } catch (error) {
+      setProjectSqliteMaintenanceByProject((current) => omitKey(current, activeProjectId));
       setNotice(error.message);
     }
   }
@@ -1135,6 +1362,7 @@ export default function App() {
     setAssets([]);
     setBoardItems([]);
     setReferences([]);
+    setSelectedDataProvider(null);
     setPrompt("");
     clearPendingReferences();
     setSelectedBoardIds([]);
@@ -1195,6 +1423,7 @@ export default function App() {
       setCurrentThreadId(null);
       setPrompt("");
       setReferences([]);
+      setSelectedDataProvider(null);
       clearPendingReferences();
       resetMessageWindow(null);
       setSelectedBoardIds([]);
@@ -1262,6 +1491,7 @@ export default function App() {
     );
     setPrompt("");
     setReferences([]);
+    setSelectedDataProvider(null);
     clearPendingReferences();
     setSelectedBoardIds([]);
     setMobileView("thread");
@@ -1275,15 +1505,27 @@ export default function App() {
 
   async function handleRenameThread(thread) {
     if (!channel) return;
-    const title = window.prompt("Thread title", thread.title);
-    if (!title || title.trim() === thread.title) return;
+    const title = await promptAction({
+      title: "重命名对话",
+      label: "Thread title",
+      initialValue: thread.title || "",
+      confirmLabel: "保存",
+      cancelLabel: "取消",
+    });
+    if (!title || title === thread.title) return;
     await channel.push("thread:rename", { id: thread.id, title });
     await refreshAll(thread.id);
   }
 
   async function handleDeleteThread(id) {
     if (!channel) return;
-    if (!window.confirm("Archive this thread?")) return;
+    const confirmed = await confirmAction({
+      title: "归档对话",
+      message: "归档当前对话？",
+      confirmLabel: "归档",
+      cancelLabel: "取消",
+    });
+    if (!confirmed) return;
     const data = await channel.push("thread:delete", { id });
     const nextThreadId = data.current_thread_id || null;
     const activeProject = project
@@ -1298,6 +1540,83 @@ export default function App() {
       setSelectedBoardIds([]);
     }
     await refreshAll(nextThreadId, activeProject);
+  }
+
+  async function handleReorderProjects(orderedIds) {
+    if (!channel || !Array.isArray(orderedIds) || orderedIds.length === 0) return;
+
+    const previousProjects = [...projects];
+    const nextProjects = reorderByIdList(projects, orderedIds);
+    const previousProjectId = project?.id;
+    const previousProject = project;
+
+    setNotice("");
+    setProjects(nextProjects);
+    setProject(previousProjectId ? nextProjects.find((entry) => entry.id === previousProjectId) || previousProject : previousProject);
+
+    try {
+      const data = await channel.push("project:reorder", {
+        ordered_ids: orderedIds,
+      });
+
+      if (data.items) {
+        setProjects(data.items);
+        if (project?.id) {
+          const next = data.items.find((entry) => entry.id === project.id);
+          if (next) setProject(next);
+        }
+      }
+    } catch (error) {
+      setProjects(previousProjects);
+      setProject(previousProjectId
+        ? previousProjects.find((entry) => entry.id === previousProjectId) || previousProject
+        : previousProject);
+      setNotice(error.message);
+    }
+  }
+
+  async function handleReorderThreads(projectId, orderedIds) {
+    if (!channel || !projectId || !Array.isArray(orderedIds) || orderedIds.length === 0)
+      return;
+
+    const previousThreads = threadsByProjectId[projectId] || [];
+    const nextThreads = reorderByIdList(previousThreads, orderedIds);
+    const previousThreadsForCurrent = project?.id === projectId ? threads : [];
+
+    setThreadsByProjectId((current) => ({
+      ...current,
+      [projectId]: nextThreads,
+    }));
+
+    if (project?.id === projectId) {
+      setThreads(nextThreads);
+    }
+
+    try {
+      const data = await channel.push("thread:reorder", {
+        project_id: projectId,
+        ordered_ids: orderedIds,
+      });
+
+      if (data.items) {
+        setThreadsByProjectId((current) => ({
+          ...current,
+          [projectId]: data.items,
+        }));
+        if (project?.id === projectId) {
+          setThreads(data.items);
+        }
+      }
+    } catch (error) {
+      setThreadsByProjectId((current) => ({
+        ...current,
+        [projectId]: previousThreads,
+      }));
+      if (project?.id === projectId) {
+        setThreads(previousThreadsForCurrent);
+      }
+      setNotice(error.message);
+    }
   }
 
   async function handleSend() {
@@ -1323,12 +1642,14 @@ export default function App() {
         thread_id: thread.id,
         text: messageText,
         asset_ids: references,
+        ...dataProviderPayload(selectedDataProvider),
         ...settingsPayload(composerSettings),
       });
 
       if (data.thread) applyThreadUpdate(data.thread);
       setPrompt("");
       setReferences([]);
+      setSelectedDataProvider(null);
       setImageSettings(defaultImageSettings(siteSettings));
       clearPendingReferences();
     } catch (error) {
@@ -1336,7 +1657,7 @@ export default function App() {
     }
   }
 
-  async function handleSendImagePrompt(assetId, text) {
+  async function handleSendImagePrompt(assetId, text, maskFile = null) {
     if (!channel || !project) throw new Error("Open a project folder first.");
 
     const messageText = String(text || "").trim();
@@ -1348,9 +1669,8 @@ export default function App() {
     setNotice("");
 
     try {
-      const thread = currentThreadId
-        ? { id: currentThreadId }
-        : await createThreadForDraft();
+      const maskAsset = maskFile ? await uploadMaskAsset(assetId, maskFile) : null;
+      const thread = await createThreadForDraft();
       if (project?.id && thread?.id) {
         navigateToPath(buildProjectWorkspacePath(project.id, thread.id));
       }
@@ -1358,11 +1678,22 @@ export default function App() {
       const data = await channel.push("message:send", {
         thread_id: thread.id,
         text: messageText,
-        asset_ids: [assetId],
+        asset_ids: maskAsset ? [assetId, maskAsset.id] : [assetId],
+        ...(maskAsset
+          ? {
+              mask_edit: {
+                mode: "visual_reference",
+                base_asset_id: assetId,
+                mask_asset_id: maskAsset.id,
+                mask_semantics: "white_edit_black_keep",
+              },
+            }
+          : {}),
         ...settingsPayload(composerSettings),
       });
 
       if (data.thread) applyThreadUpdate(data.thread);
+      if (maskAsset) await refreshAssetsAndBoard();
       return data;
     } catch (error) {
       setNotice(error.message);
@@ -1674,19 +2005,24 @@ export default function App() {
 
   function handleLocateAsset(assetId) {
     const boardItem = boardItems.find((item) => item.asset_id === assetId);
+    const asset = assets.find((candidate) => candidate.id === assetId);
 
-    if (boardItem) {
-      setSelectedBoardIds([boardItem.id]);
+    if (boardItem || isWorkAsset(asset)) {
+      setSelectedBoardIds(boardItem ? [boardItem.id] : []);
       setBoardFocusRequest({ assetId, requestId: Date.now() });
+      setNotice("");
+
+      if (window.matchMedia("(max-width: 760px)").matches) {
+        setMobileView("board");
+      } else if (window.matchMedia("(max-width: 1080px)").matches) {
+        setCollapsedLeftAndMiddle(true);
+      }
+
+      return;
     }
 
-    if (window.matchMedia("(max-width: 1080px)").matches) {
-      addReference(assetId);
-      setNotice("Board is hidden at this width; image added as a reference.");
-    } else if (!boardItem) {
-      addReference(assetId);
-      setNotice("Image added as a reference.");
-    }
+    addReference(assetId);
+    setNotice("Image added as a reference.");
   }
 
   async function handleResize(id, displayWidth, displayHeight, commit) {
@@ -1774,12 +2110,14 @@ export default function App() {
     const asset = assets.find((candidate) => candidate.id === item.asset_id);
     const fileName = asset?.file_name || item.file_name || "selected image";
 
-    if (
-      !window.confirm(
-        `删除图片“${fileName}”？这会通过 rm 删除单个文件，操作不可撤销。`,
-      )
-    )
-      return;
+    const confirmed = await confirmAction({
+      title: "删除图片",
+      message: `删除图片“${fileName}”？这会通过 rm 删除单个文件，操作不可撤销。`,
+      confirmLabel: "删除",
+      cancelLabel: "取消",
+      tone: "danger",
+    });
+    if (!confirmed) return;
 
     setNotice("");
 
@@ -1898,34 +2236,64 @@ export default function App() {
       : false;
   const anyAgentRunning = Object.keys(runningTurns).length > 0;
   const runningThreadIds = Object.keys(runningTurns);
+  const projectDbInfoProject = useMemo(() => {
+    if (!projectSqliteInfoProjectId) return project;
+    return (
+      projects.find((entry) => entry.id === projectSqliteInfoProjectId) ||
+      (project?.id === projectSqliteInfoProjectId ? project : null)
+    );
+  }, [project, projects, projectSqliteInfoProjectId]);
   const streamingText = activeRun
     ? streamingByTurn[activeRun.turn_id]?.text || ""
     : "";
+  const confirmDialog = confirmRequest ? (
+    <ConfirmDialog
+      {...confirmRequest}
+      onCancel={() => settleConfirm(false)}
+      onConfirm={() => settleConfirm(true)}
+    />
+  ) : null;
+  const promptDialog = promptRequest ? (
+    <PromptDialog
+      {...promptRequest}
+      onCancel={() => settlePrompt(null)}
+      onConfirm={(value) => settlePrompt(value)}
+    />
+  ) : null;
 
   if (tracingThreadId) {
     return (
-      <TracingPage
-        channel={channel}
-        connectionState={connectionState}
-        project={project}
-        threadId={tracingThreadId}
-        threads={threads}
-        onBack={() => navigateToPath("/web")}
-      />
+      <>
+        <TracingPage
+          channel={channel}
+          connectionState={connectionState}
+          project={project}
+          threadId={tracingThreadId}
+          threads={threads}
+          onBack={() => navigateToPath("/web")}
+        />
+        {confirmDialog}
+        {promptDialog}
+      </>
     );
   }
 
   if (settingsRoute) {
     return (
-      <SettingsPage
-        settingsItems={siteSettingItems}
-        settings={siteSettings}
-        modelOptions={modelOptions}
-        connectionState={connectionState}
-        onSave={handleSaveSiteSettings}
-        onReset={handleResetSiteSettings}
-        onBack={handleCloseSettings}
-      />
+      <>
+        <SettingsPage
+          settingsItems={siteSettingItems}
+          settings={siteSettings}
+          modelOptions={modelOptions}
+          connectionState={connectionState}
+          onSave={handleSaveSiteSettings}
+          onReset={handleResetSiteSettings}
+          onBack={handleCloseSettings}
+          onConfirm={confirmAction}
+        />
+        {confirmDialog}
+        {promptDialog}
+      </>
     );
   }
 
@@ -1974,9 +2342,13 @@ export default function App() {
           onArchiveProject={handleArchiveProject}
           onArchiveProjectThreads={handleArchiveProjectThreads}
           onDeleteProject={handleDeleteProject}
+          onReorderProjects={handleReorderProjects}
+          onReorderThreads={handleReorderThreads}
+          onShowProjectDbInfo={handleShowProjectDbInfo}
           onOpenSettings={handleOpenSettings}
           connectionState={connectionState}
           agentRunning={anyAgentRunning}
+          agentThinkingStep={agentThinking.step}
           runningThreadIds={runningThreadIds}
         />
 
@@ -2021,11 +2393,13 @@ export default function App() {
               siteSettings={siteSettings}
               composerSettings={composerSettings}
               imageSettings={imageSettings}
+              selectedDataProvider={selectedDataProvider}
               defaultImageSettings={defaultImageSettings(siteSettings)}
               onComposerSettingsChange={handleComposerSettingsChange}
               onImageSettingsChange={(patch) =>
                 setImageSettings((current) => ({ ...current, ...patch }))
               }
+              onDataProviderChange={setSelectedDataProvider}
               onApprovalRespond={handleApprovalRespond}
               onUpdateItem={handleUpdateItem}
               onLoadEarlier={handleLoadEarlierItems}
@@ -2049,6 +2423,7 @@ export default function App() {
               onCopyPath={handleCopyPath}
               onDeleteSelected={handleDeleteSelectedBoardItem}
               collapsedLeftAndMiddle={collapsedLeftAndMiddle}
+              onOpenShortcuts={() => setShowShortcutGuideDialog(true)}
               onToggleLeftAndMiddle={() =>
                 setCollapsedLeftAndMiddle((value) => !value)
               }
@@ -2065,6 +2440,23 @@ export default function App() {
           </div>
         ) : null}
       </div>
+
+      {showProjectDbInfoDialog ? (
+        <ProjectDbInfoDialog
+          info={projectSqliteInfo}
+          projectName={projectDbInfoProject?.name}
+          maintenance={projectSqliteMaintenanceByProject[projectSqliteInfoProjectId]}
+          isLoading={projectSqliteInfoLoading}
+          onClose={() => setShowProjectDbInfoDialog(false)}
+          onRefresh={() => refreshProjectSqliteInfo(projectSqliteInfoProjectId)}
+          onRunMaintenance={handleRunProjectSqliteMaintenance}
+        />
+      ) : null}
+      {showShortcutGuideDialog ? (
+        <ShortcutGuideDialog onClose={() => setShowShortcutGuideDialog(false)} />
+      ) : null}
+      {confirmDialog}
+      {promptDialog}
     </>
   );
 }
@@ -2076,6 +2468,27 @@ function mergeById(items) {
     seen.add(item.id);
     return true;
   });
+}
+
+function reorderByIdList(items, orderedIds) {
+  const source = items || [];
+  const order = orderedIds || [];
+  const byId = new Map(source.map((item) => [item.id, item]));
+  const next = [];
+  const used = new Set();
+
+  order.forEach((id) => {
+    const entry = byId.get(id);
+    if (!entry || used.has(id)) return;
+    used.add(id);
+    next.push(entry);
+  });
+
+  source.forEach((item) => {
+    if (!used.has(item.id)) next.push(item);
+  });
+
+  return next;
 }
 
 function upsertById(items, item) {
@@ -2232,6 +2645,14 @@ function isSupportedReferenceImage(file) {
   return /\.(png|jpe?g|gif|webp)$/i.test(file.name || "");
 }
 
+function isWorkAsset(asset) {
+  return (
+    asset?.source !== "mask" &&
+    typeof asset?.relative_path === "string" &&
+    asset.relative_path.startsWith("work/")
+  );
+}
+
 function revokePendingReferencePreviews(previews) {
   previews.forEach((previewUrl) => URL.revokeObjectURL(previewUrl));
   previews.clear();
@@ -2306,6 +2727,19 @@ function settingsPayload(settings) {
     effort: settings.effort || null,
     approval_policy: settings.approval_policy || "never",
     sandbox_mode: settings.sandbox_mode || "workspace-write",
+  };
+}
+
+function dataProviderPayload(provider) {
+  if (!provider?.slug) return {};
+
+  return {
+    data_provider: {
+      slug: provider.slug,
+      name: provider.name,
+      version: provider.version || null,
+      loaded: provider.loaded === true,
+    },
   };
 }
 

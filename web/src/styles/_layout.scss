@@ -208,6 +208,12 @@ input:disabled {
   .board-pane {
     display: none;
   }
+
+  .workbench.collapsed-panes .board-pane,
+  .app-shell.collapsed-panes .board-pane {
+    display: grid;
+    min-width: 0;
+  }
 }
 
 @media (max-width: 760px) {

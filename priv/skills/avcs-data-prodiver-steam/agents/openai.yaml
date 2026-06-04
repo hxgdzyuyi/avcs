@@ -1,0 +1,5 @@
+interface:
+  display_name: "Steam Data Provider"
+  short_description: "Fetch Steam game covers and metadata via storesearch/appdetails"
+  default_prompt: "When user asks for Steam game info or cover, run this provider script and return image path, appid, store url, title, description, and cover keys."
+  icon_small: "/Users/qingyang/mine-work/avcs/priv/skills/avcs-data-prodiver-steam/assets/icon-small.png"

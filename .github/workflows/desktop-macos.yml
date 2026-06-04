@@ -18,6 +18,10 @@ jobs:
   build:
     name: Build and release macOS Apple Silicon app
     runs-on: macos-15
+    env:
+      ENABLE_APP_SIGNING: "${{ vars.ENABLE_APP_SIGNING || 'true' }}"
+      APPLE_SIGNING_IDENTITY: "${{ vars.APPLE_SIGNING_IDENTITY || '-' }}"
+      APPLE_SIGNING_ENTITLEMENTS: "${{ vars.APPLE_SIGNING_ENTITLEMENTS || '' }}"
 
     steps:
       - name: Checkout repository
@@ -70,6 +74,36 @@ jobs:
         shell: bash
         run: rel/app/tauri.sh build --target aarch64-apple-darwin
 
+      - name: Sign app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="rel/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Avcs.app"
+          if [ "${ENABLE_APP_SIGNING}" != "true" ]; then
+            echo "ENABLE_APP_SIGNING is ${ENABLE_APP_SIGNING}. Skip app signing."
+            exit 0
+          fi
+
+          signing_identity="${APPLE_SIGNING_IDENTITY:-"-"}"
+          echo "Signing app with identity: ${signing_identity}"
+
+          args=(
+            "--force"
+            "--deep"
+            "--options"
+            "runtime"
+          )
+
+          if [ -n "${APPLE_SIGNING_ENTITLEMENTS}" ]; then
+            args+=("--entitlements" "${APPLE_SIGNING_ENTITLEMENTS}")
+          fi
+
+          args+=("--sign" "${signing_identity}" "${app_path}")
+          codesign "${args[@]}"
+          codesign --verify --deep --strict "${app_path}"
+          spctl --assess --type execute "${app_path}"
+
       - name: Zip app bundle
         shell: bash
         run: |
@@ -105,7 +139,8 @@ jobs:
           notes="$(cat <<EOF
           macOS Apple Silicon build for ${tag}.
 
-          This app is not signed with an Apple Developer ID certificate and is not notarized.
+          This app is signed before packaging using codesign (identity: ${APPLE_SIGNING_IDENTITY}),
+          with runtime options enabled. It is not notarized.
           EOF
           )"
 

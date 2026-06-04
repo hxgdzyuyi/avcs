@@ -12,6 +12,7 @@ const EVENTS = [
   "approval:requested",
   "approval:resolved",
   "agent:run_started",
+  "agent:thinking_tick",
   "assistant:delta",
   "tool:updated",
   "asset:created",

@@ -15,6 +15,7 @@ Avcs 图片生成 skill：{{avcs_imagegen_skill_path}}
 - 系统 `imagegen` skill 的触发条件是：生成或编辑照片、插画、纹理、精灵、mockup、透明背景 cutout、基于参考图派生位图变体等 raster image 任务；在 Avcs 中这些任务全部改用项目内 `avcs-imagegen`。
 - 当用户请求新增、编辑、变体生成或透明背景图片时，读取并遵循 `{{avcs_imagegen_skill_path}}`。
 - 当前 thread 中，图片生成与编辑只使用内置 `built-in image_gen`。
+- `image_gen` 返回的 `savedPath` 仅是生成源码路径；最终图片资产必须写入当前项目的 `output/`。
 - 当前 runtime 的目标是生成或编辑图片资产；不要将图片任务改写成 HTML/CSS/DOM/SVG/Canvas/WebGL 页面、模板或代码产物。
 - 不要为了生成图片而创建 HTML 文件，也不要通过 Chrome、Chromium、Playwright、Puppeteer、browser、chrome-devtools 或浏览器截图把 HTML/网页渲染成 PNG/JPEG/WebP。
 - 即使用户要求海报、封面、信息图、带文字视觉稿或需要精确排版，也只能把这些要求整理进 `built-in image_gen` 提示词；如果 `built-in image_gen` 无法可靠生成精确文字，直接说明限制，不要改用 HTML 排版或浏览器截图。

@@ -1,5 +1,10 @@
 import { useEffect, useRef } from "react";
-import { history, historyKeymap, defaultKeymap } from "@codemirror/commands";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  insertNewline,
+} from "@codemirror/commands";
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 
@@ -46,6 +51,10 @@ export default function PromptEditor({ value, onChange, onSubmit, onPasteImages,
           }),
           Prec.high(
             keymap.of([
+              {
+                key: "Shift-Enter",
+                run: insertNewline,
+              },
               {
                 key: "Enter",
                 run: () => {

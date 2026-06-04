@@ -1,4 +1,5 @@
 @use "tokens" as *;
+@use "sass:color";
 
 .icon-button {
   display: inline-flex;
@@ -263,6 +264,40 @@
   gap: 1px;
 }
 
+.sidebar-project-row.draggable,
+.sidebar-thread-row.draggable {
+  cursor: grab;
+}
+
+.sidebar-project-row.dragging,
+.sidebar-thread-row.dragging {
+  opacity: 0.65;
+}
+
+.sidebar-project-row.dragging {
+  cursor: grabbing;
+}
+
+.sidebar-thread-row.dragging {
+  cursor: grabbing;
+}
+
+.sidebar-project-row-placeholder,
+.sidebar-thread-row-placeholder {
+  border-radius: 8px;
+  background: $selection-weak;
+  border: 1px dashed $line;
+  margin: 1px 0;
+}
+
+.sidebar-project-row-placeholder {
+  min-height: 34px;
+}
+
+.sidebar-thread-row-placeholder {
+  min-height: 32px;
+}
+
 .project-name,
 .project-state {
   overflow: hidden;
@@ -431,25 +466,60 @@
 }
 
 .project-status {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: auto;
   padding: 12px 14px 16px;
   border-top: 1px solid $soft-line;
 }
 
-.project-status div {
+.project-status-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  min-width: 0;
+  gap: 6px;
   color: $muted;
   font-size: 12px;
 }
 
-.project-status strong {
+.project-status-item:last-child {
+  margin-left: auto;
+}
+
+.project-status-item strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 40px;
   color: $ink;
   font-weight: 600;
+}
+
+.agent-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 38px;
+  height: 12px;
+}
+
+.agent-thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: $selection;
+  opacity: 0.24;
+  transform: scale(0.84);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.agent-thinking-dot.active {
+  opacity: 1;
+  transform: scale(1);
 }
 
 .thread-title {
@@ -1520,6 +1590,7 @@
 .user-bubble {
   display: grid;
   gap: 8px;
+  min-width: 0;
   max-width: 72%;
   padding: 9px 11px;
   border: 1px solid $soft-line;
@@ -1545,12 +1616,16 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .message-reference {
   display: inline-flex;
   align-items: center;
+  flex: 0 1 auto;
   gap: 5px;
+  min-width: 0;
   max-width: 100%;
   height: 28px;
   padding: 3px 6px 3px 3px;
@@ -1562,6 +1637,7 @@
 }
 
 .message-reference img {
+  flex: 0 0 auto;
   width: 22px;
   height: 22px;
   object-fit: cover;
@@ -1569,6 +1645,7 @@
 }
 
 .message-reference span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1866,6 +1943,621 @@
   flex: 0 0 auto;
 }
 
+.confirm-dialog-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(24, 28, 35, 0.42);
+}
+
+.confirm-dialog {
+  display: grid;
+  gap: 16px;
+  width: min(420px, 100%);
+  padding: 16px;
+  border: 1px solid $line;
+  border-radius: 8px;
+  color: $ink;
+  background: $surface;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
+}
+
+.confirm-dialog-header {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 28px;
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.confirm-dialog-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: $selection;
+  background: $selection-weak;
+}
+
+.confirm-dialog.danger .confirm-dialog-icon {
+  color: $danger;
+  background: color.mix($danger, #fff, 10%);
+}
+
+.confirm-dialog-copy {
+  min-width: 0;
+}
+
+.confirm-dialog-copy h2 {
+  margin: 0;
+  color: $ink;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.confirm-dialog-copy p {
+  margin: 5px 0 0;
+  color: $muted;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.confirm-dialog-close.icon-button {
+  width: 28px;
+  height: 28px;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.confirm-dialog-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid $line;
+  border-radius: 7px;
+  color: $ink;
+  background: $surface;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.confirm-dialog-button:hover:not(:disabled) {
+  background: $panel;
+}
+
+.confirm-dialog-button:focus-visible {
+  outline: 2px solid $selection-weak;
+  outline-offset: 2px;
+}
+
+.confirm-dialog-button.primary {
+  color: #fff;
+  border-color: $action;
+  background: $action;
+}
+
+.confirm-dialog-button.primary:hover:not(:disabled) {
+  background: color.adjust($action, $lightness: -6%);
+}
+
+.confirm-dialog-button.primary.danger {
+  border-color: $danger;
+  background: $danger;
+}
+
+.confirm-dialog-button.primary.danger:hover:not(:disabled) {
+  background: color.adjust($danger, $lightness: -6%);
+}
+
+.confirm-dialog-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.prompt-dialog {
+  gap: 14px;
+}
+
+.prompt-dialog-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.prompt-dialog-field span {
+  color: $muted;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.prompt-dialog-field input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid $line;
+  border-radius: 7px;
+  color: $ink;
+  background: $surface;
+  font-size: 13px;
+}
+
+.prompt-dialog-field input:focus {
+  outline: 2px solid $selection-weak;
+  border-color: $selection;
+}
+
+.shortcut-guide-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(24, 28, 35, 0.42);
+}
+
+.shortcut-guide-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 36px));
+  border: 1px solid $line;
+  border-radius: 8px;
+  overflow: hidden;
+  color: $ink;
+  background: $surface;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
+}
+
+.shortcut-guide-header {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 28px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid $soft-line;
+}
+
+.shortcut-guide-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: $selection;
+  background: $selection-weak;
+}
+
+.shortcut-guide-header h2 {
+  margin: 0;
+  color: $ink;
+  font-size: 15px;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.shortcut-guide-header small {
+  color: $muted;
+  font-size: 12px;
+}
+
+.shortcut-guide-content {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 16px;
+  overflow: auto;
+}
+
+.shortcut-guide-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shortcut-guide-section h3 {
+  margin: 0;
+  color: $ink;
+  font-size: 12px;
+  line-height: 1.25;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.shortcut-guide-grid {
+  display: grid;
+  min-width: 0;
+  border: 1px solid $soft-line;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.shortcut-guide-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(116px, 160px) minmax(116px, 160px);
+  min-width: 0;
+  border-top: 1px solid $soft-line;
+}
+
+.shortcut-guide-row:first-child {
+  border-top: 0;
+}
+
+.shortcut-guide-row.heading {
+  color: $muted;
+  background: $panel;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.shortcut-guide-row > span {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px 10px;
+  border-left: 1px solid $soft-line;
+  font-size: 12px;
+}
+
+.shortcut-guide-row > span:first-child {
+  border-left: 0;
+}
+
+.shortcut-guide-keys {
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.shortcut-guide-keys.muted {
+  color: $muted;
+}
+
+.shortcut-guide-key-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.shortcut-guide-or {
+  color: $muted;
+  font-size: 11px;
+}
+
+.shortcut-guide-keys kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 0 6px;
+  border: 1px solid $line;
+  border-radius: 5px;
+  color: $ink;
+  background: $surface;
+  font:
+    11px/1 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    "Liberation Mono",
+    monospace;
+}
+
+.project-db-info-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(24, 28, 35, 0.42);
+}
+
+.project-db-info-dialog {
+  display: grid;
+  gap: 14px;
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  padding: 16px;
+  border: 1px solid $line;
+  border-radius: 8px;
+  overflow: auto;
+  color: $ink;
+  background: $surface;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
+}
+
+.project-db-info-header,
+.project-db-info-actions-inline,
+.project-db-buttons {
+  display: flex;
+  align-items: center;
+}
+
+.project-db-info-header {
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid $soft-line;
+}
+
+.project-db-info-title {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.project-db-info-title-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: $selection;
+  background: $selection-weak;
+}
+
+.project-db-info-title strong,
+.project-db-info-title small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-db-info-title strong {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.project-db-info-title small {
+  margin-top: 2px;
+  color: $muted;
+  font-size: 12px;
+}
+
+.project-db-info-actions-inline {
+  gap: 4px;
+}
+
+.project-db-info-metrics,
+.project-db-info-tables,
+.project-db-info-actions-area {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.project-db-info-metrics h3,
+.project-db-info-tables h3,
+.project-db-info-actions-area h3 {
+  margin: 0;
+  color: $ink;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.project-db-info-metrics dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.project-db-info-metrics dl > div,
+.project-db-table-row {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid $soft-line;
+  border-radius: 8px;
+  background: $panel;
+}
+
+.project-db-info-metrics dt {
+  color: $muted;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.project-db-info-metrics dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: $ink;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-db-table-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.project-db-table-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.project-db-table-row span {
+  overflow: hidden;
+  color: $muted;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-db-table-row strong {
+  font-size: 13px;
+}
+
+.project-db-empty,
+.project-db-info-state,
+.project-db-info-explainer,
+.project-db-info-note {
+  margin: 0;
+  color: $muted;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.project-db-info-explainer {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid $soft-line;
+  border-radius: 8px;
+  background: $panel;
+}
+
+.project-db-info-explainer p {
+  margin: 0;
+}
+
+.project-db-info-explainer strong {
+  color: $ink;
+  font-weight: 650;
+}
+
+.project-db-info-state {
+  color: $selection;
+}
+
+.project-db-buttons {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-db-buttons button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid $line;
+  border-radius: 7px;
+  color: $ink;
+  background: $surface;
+  font-size: 12px;
+}
+
+.project-db-buttons button.primary {
+  color: #fff;
+  border-color: $action;
+  background: $action;
+}
+
+.project-db-buttons button:hover:not(:disabled) {
+  background: $panel;
+}
+
+.project-db-buttons button.primary:hover:not(:disabled) {
+  background: color.adjust($action, $lightness: -6%);
+}
+
+.project-db-buttons button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+@media (max-width: 640px) {
+  .shortcut-guide-backdrop {
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .shortcut-guide-dialog {
+    max-height: calc(100vh - 20px);
+  }
+
+  .shortcut-guide-row {
+    grid-template-columns: minmax(0, 1fr) minmax(92px, auto) minmax(92px, auto);
+  }
+
+  .shortcut-guide-row > span {
+    padding: 7px 8px;
+  }
+
+  .project-db-info-backdrop {
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .project-db-info-dialog {
+    max-height: calc(100vh - 20px);
+  }
+
+  .project-db-info-metrics dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 480px) {
+  .shortcut-guide-content {
+    padding: 12px;
+  }
+
+  .shortcut-guide-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shortcut-guide-row.heading {
+    display: none;
+  }
+
+  .shortcut-guide-row > span {
+    border-left: 0;
+    border-top: 1px solid $soft-line;
+  }
+
+  .shortcut-guide-row > span:first-child {
+    border-top: 0;
+    font-weight: 650;
+  }
+
+  .confirm-dialog {
+    padding: 14px;
+  }
+
+  .confirm-dialog-header {
+    grid-template-columns: 30px minmax(0, 1fr) 28px;
+  }
+
+  .confirm-dialog-icon {
+    width: 30px;
+    height: 30px;
+  }
+
+  .confirm-dialog-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .confirm-dialog-button {
+    width: 100%;
+  }
+}
+
 .reference-chip span {
   max-width: 210px;
   overflow: hidden;
@@ -1967,17 +2659,42 @@
   display: none;
 }
 
+.composer-data-provider-wrap,
 .composer-image-settings-wrap {
   position: relative;
   flex: 0 0 auto;
 }
 
+.composer-data-provider-button,
 .composer-image-settings-button {
   width: 34px;
   height: 34px;
   border-radius: 999px;
 }
 
+.composer-data-provider-button img,
+.provider-chip img,
+.data-provider-list img {
+  display: block;
+  object-fit: cover;
+}
+
+.composer-data-provider-button img {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+}
+
+.provider-chip {
+  border-color: rgba($selection, 0.34);
+  background: $selection-weak;
+}
+
+.provider-chip small {
+  color: $selection;
+}
+
+.composer-data-provider-panel,
 .composer-image-settings-panel {
   position: absolute;
   right: 0;
@@ -1991,6 +2708,97 @@
   border-radius: 8px;
   background: $surface;
   box-shadow: $shadow;
+}
+
+.composer-data-provider-panel {
+  right: -56px;
+  width: min(340px, calc(100vw - 24px));
+}
+
+.composer-image-settings-panel {
+  right: -56px;
+}
+
+.data-provider-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.data-provider-list button {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 48px;
+  padding: 7px 8px;
+  border: 1px solid $line;
+  border-radius: 8px;
+  color: $ink;
+  background: $surface;
+  text-align: left;
+}
+
+.data-provider-list button:hover,
+.data-provider-list button.selected {
+  border-color: $selection;
+  background: $selection-weak;
+}
+
+.data-provider-list img {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+}
+
+.data-provider-list span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.data-provider-list strong,
+.data-provider-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-provider-list strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.data-provider-list small {
+  color: $muted;
+  font-size: 11px;
+}
+
+.data-provider-list em {
+  color: $selection;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.data-provider-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: fit-content;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid $line;
+  border-radius: 6px;
+  color: $muted;
+  background: $surface;
+  font-size: 12px;
+}
+
+.data-provider-clear:hover {
+  color: $ink;
+  background: $panel;
 }
 
 .image-settings-group {
@@ -2304,6 +3112,11 @@
   background: #fff;
 }
 
+.work-asset-row.focused {
+  border-color: $selection;
+  box-shadow: 0 0 0 2px $selection-weak;
+}
+
 .work-asset-main {
   display: grid;
   grid-template-columns: 58px minmax(0, 1fr);
@@ -2422,13 +3235,8 @@
 
 .board-world {
   position: absolute;
-  left: 0;
-  top: 0;
-  width: 1px;
-  height: 1px;
-  transform-origin: 0 0;
+  inset: 0;
   pointer-events: auto;
-  will-change: transform;
 }
 
 .board-overlay {
@@ -2699,6 +3507,48 @@
   white-space: nowrap;
 }
 
+.board-object-menu {
+  position: absolute;
+  z-index: 3200;
+  display: grid;
+  width: 184px;
+  padding: 5px;
+  border: 1px solid $line;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: $shadow;
+  pointer-events: auto;
+}
+
+.board-object-menu button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  color: $ink;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 560;
+  text-align: left;
+}
+
+.board-object-menu button:hover:not(:disabled) {
+  background: $panel;
+}
+
+.board-object-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+}
+
+.board-object-menu svg {
+  color: $muted;
+}
+
 .board-floating-tools {
   position: absolute;
   right: 16px;
@@ -2809,7 +3659,15 @@
   background: rgba(255, 255, 255, 0.72);
 }
 
+.image-preview-actions .icon-button.active,
+.image-preview-mask-toolbar .icon-button.active {
+  border-color: rgba(37, 99, 235, 0.46);
+  color: #1d4ed8;
+  background: rgba(37, 99, 235, 0.12);
+}
+
 .image-preview-stage {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2820,7 +3678,47 @@
   background: $workspace;
 }
 
+.image-preview-mask-toolbar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  max-width: calc(100vw - 36px);
+  min-width: 0;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba($line, 0.92);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 14px 34px rgba(31, 35, 40, 0.14);
+  transform: translateX(-50%);
+}
+
+.image-preview-mask-toolbar .icon-button {
+  width: 32px;
+  height: 32px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.image-preview-brush-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 118px;
+  padding: 0 8px;
+  color: $muted;
+  font-size: 12px;
+}
+
+.image-preview-brush-size input {
+  width: 78px;
+  accent-color: #2563eb;
+}
+
 .image-preview-image-wrap {
+  position: relative;
   display: grid;
   place-items: center;
   max-width: min(100%, calc(100vw - 48px));
@@ -2839,11 +3737,33 @@
   background-size: 18px 18px;
 }
 
+.image-preview-image-wrap.masking {
+  cursor: crosshair;
+}
+
 .image-preview-image-wrap img {
   display: block;
   max-width: min(100%, calc(100vw - 48px));
   max-height: calc(100vh - 180px);
   object-fit: contain;
+}
+
+.image-preview-mask-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  touch-action: none;
+}
+
+.image-preview-mask-canvas.active {
+  pointer-events: auto;
+}
+
+.image-preview-mask-canvas.dirty {
+  outline: 1px solid rgba(37, 99, 235, 0.28);
+  outline-offset: -1px;
 }
 
 .image-preview-composer {
@@ -2939,9 +3859,18 @@
     max-width: min(48vw, 210px);
   }
 
+  .composer-data-provider-panel,
   .composer-image-settings-panel {
     right: -44px;
     width: min(320px, calc(100vw - 20px));
+  }
+
+  .composer-data-provider-panel {
+    right: -72px;
+  }
+
+  .composer-image-settings-panel {
+    right: -72px;
   }
 
   .composer-settings-backdrop {
@@ -2997,6 +3926,20 @@
 
   .image-preview-stage {
     padding: 12px;
+  }
+
+  .image-preview-mask-toolbar {
+    top: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .image-preview-brush-size {
+    min-width: 104px;
+  }
+
+  .image-preview-brush-size input {
+    width: 66px;
   }
 
   .image-preview-image-wrap,

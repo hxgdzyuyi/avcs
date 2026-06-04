@@ -29,10 +29,13 @@ defmodule AvcsWeb.Router do
 
     post "/project/create_blank", ProjectController, :create_blank
     post "/project/open", ProjectController, :open
+    get "/project/sqlite_info", ProjectController, :sqlite_info
+    post "/project/sqlite_maintenance", ProjectController, :sqlite_maintenance
 
     get "/assets/:id/preview", AssetController, :preview
     post "/assets/import", AssetController, :import
     post "/assets/upload", AssetController, :upload
+    post "/assets/mask", AssetController, :mask
     post "/assets/scan", AssetController, :scan
     post "/assets/:id/reveal", AssetController, :reveal
     get "/assets/:id/path", AssetController, :path

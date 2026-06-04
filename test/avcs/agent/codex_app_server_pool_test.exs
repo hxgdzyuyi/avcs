@@ -154,6 +154,32 @@ defmodule Avcs.Agent.CodexAppServerPoolTest do
     assert {:ok, %{codex_thread_id: "codex-thread-3"}} = Task.await(third, 1_000)
   end
 
+  test "does not queue non-turn requests when all workers are busy" do
+    project = project("project-non-turn-busy")
+
+    first = async_run(project, "thread-1", "turn-1", nil, "one")
+    second = async_run(project, "thread-2", "turn-2", nil, "two")
+
+    assert_receive {:worker_started, worker_1}
+    assert_receive {:run_turn, ^worker_1, nil, "one"}
+    assert_receive {:worker_started, worker_2}
+    assert_receive {:run_turn, ^worker_2, nil, "two"}
+
+    models_task = Task.async(fn -> Avcs.Agent.CodexAppServerPool.list_models() end)
+    read_task = Task.async(fn -> Avcs.Agent.CodexAppServerPool.read_thread("codex-thread-1") end)
+
+    assert {:error, "Codex app-server workers are busy"} = Task.await(models_task, 200)
+    assert {:error, "Codex app-server workers are busy"} = Task.await(read_task, 200)
+    assert %{waiting_count: 0} = Avcs.Agent.CodexAppServerPool.stats()
+    refute_received {:list_models, _worker}
+    refute_received {:read_thread, _worker, _codex_thread_id}
+
+    send(worker_1, {:complete, "codex-thread-1"})
+    send(worker_2, {:complete, "codex-thread-2"})
+    assert {:ok, %{codex_thread_id: "codex-thread-1"}} = Task.await(first, 1_000)
+    assert {:ok, %{codex_thread_id: "codex-thread-2"}} = Task.await(second, 1_000)
+  end
+
   test "reuses local and codex routes for the same worker" do
     project = project("project-routes")
 

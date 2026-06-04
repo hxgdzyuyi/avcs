@@ -92,6 +92,30 @@ defmodule AvcsWeb.AvcsChannel do
     end
   end
 
+  def handle_in("project:reorder", %{"ordered_ids" => ordered_ids}, socket) do
+    case Avcs.Projects.reorder_projects(ordered_ids) do
+      {:ok, projects} ->
+        Avcs.Projects.broadcast_projects_updated()
+        reply_ok(%{items: projects}, socket)
+
+      {:error, :project_not_found} ->
+        reply_error("project_not_found", "Some project was not found", socket)
+
+      {:error, :project_unavailable} ->
+        reply_error("project_unavailable", "Some project folder is unavailable", socket)
+
+      {:error, :invalid_reorder_payload} ->
+        reply_error("invalid_reorder_payload", "Invalid reorder payload", socket)
+
+      {:error, reason} ->
+        reply_error("project_reorder_failed", to_string(reason), socket)
+    end
+  end
+
+  def handle_in("project:reorder", _payload, socket) do
+    reply_error("invalid_reorder_payload", "Invalid reorder payload", socket)
+  end
+
   def handle_in("threads:list", %{"project_id" => project_id}, socket) do
     with_project_by_id(project_id, socket, fn project ->
       {:ok, threads} = Avcs.Threads.list_threads(project)
@@ -144,6 +168,52 @@ defmodule AvcsWeb.AvcsChannel do
       Avcs.Projects.broadcast_projects_updated()
       reply_ok(thread, socket)
     end)
+  end
+
+  def handle_in(
+        "thread:reorder",
+        %{"project_id" => project_id, "ordered_ids" => ordered_ids},
+        socket
+      ) do
+    with_project_by_id(project_id, socket, fn project ->
+      case Avcs.Threads.reorder_threads(project, ordered_ids) do
+        {:ok, threads} ->
+          broadcast_threads(project)
+          reply_ok(%{project_id: project["id"], items: threads}, socket)
+
+        {:error, :thread_not_found} ->
+          reply_error("thread_not_found", "Some thread was not found", socket)
+
+        {:error, :invalid_reorder_payload} ->
+          reply_error("invalid_reorder_payload", "Invalid reorder payload", socket)
+
+        {:error, reason} ->
+          reply_error("thread_reorder_failed", to_string(reason), socket)
+      end
+    end)
+  end
+
+  def handle_in("thread:reorder", payload, socket) do
+    if is_map(payload) do
+      with_project_by_id(payload["project_id"], socket, fn project ->
+        case Avcs.Threads.reorder_threads(project, payload["ordered_ids"]) do
+          {:ok, threads} ->
+            broadcast_threads(project)
+            reply_ok(%{project_id: project["id"], items: threads}, socket)
+
+          {:error, :thread_not_found} ->
+            reply_error("thread_not_found", "Some thread was not found", socket)
+
+          {:error, :invalid_reorder_payload} ->
+            reply_error("invalid_reorder_payload", "Invalid reorder payload", socket)
+
+          {:error, reason} ->
+            reply_error("thread_reorder_failed", to_string(reason), socket)
+        end
+      end)
+    else
+      reply_error("invalid_reorder_payload", "Invalid reorder payload", socket)
+    end
   end
 
   def handle_in("thread:delete", %{"id" => id}, socket) do
@@ -271,24 +341,29 @@ defmodule AvcsWeb.AvcsChannel do
     with_project(socket, fn project ->
       thread_id = payload["thread_id"] || Avcs.Session.current_thread_id()
       text = String.trim(payload["text"] || "")
-      asset_ids = payload["asset_ids"] || []
       turn_settings = Avcs.Threads.clean_settings(payload)
 
-      if text == "" and asset_ids == [] do
-        reply_error("empty_message", "Message text or image reference is required", socket)
-      else
-        {:ok, thread} = Avcs.Threads.update_settings(project, thread_id, turn_settings)
-        {:ok, thread} = Avcs.Threads.maybe_title_from_message(project, thread, text)
+      case message_assets_and_settings(project, payload, turn_settings) do
+        {:ok, asset_ids, turn_settings} ->
+          if text == "" and asset_ids == [] do
+            reply_error("empty_message", "Message text or image reference is required", socket)
+          else
+            {:ok, thread} = Avcs.Threads.update_settings(project, thread_id, turn_settings)
+            {:ok, thread} = Avcs.Threads.maybe_title_from_message(project, thread, text)
 
-        runner = Application.get_env(:avcs, :agent_runner, Avcs.Agent.Runner)
+            runner = Application.get_env(:avcs, :agent_runner, Avcs.Agent.Runner)
 
-        case submit_runner(runner, project, thread_id, text, asset_ids, turn_settings) do
-          {:ok, created} ->
-            reply_ok(Map.put(created, "thread", thread), socket)
+            case submit_runner(runner, project, thread_id, text, asset_ids, turn_settings) do
+              {:ok, created} ->
+                reply_ok(Map.put(created, "thread", thread), socket)
 
-          {:error, reason} ->
-            reply_error("message_send_failed", to_string(reason), socket)
-        end
+              {:error, reason} ->
+                reply_error("message_send_failed", to_string(reason), socket)
+            end
+          end
+
+        {:error, code, message} ->
+          reply_error(code, message, socket)
       end
     end)
   end
@@ -358,16 +433,13 @@ defmodule AvcsWeb.AvcsChannel do
   end
 
   def handle_in("models:list", _payload, socket) do
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
+    socket_ref = socket_ref(socket)
 
-    if module_exports?(codex_client, :list_models, 0) do
-      case codex_client.list_models() do
-        {:ok, models} -> reply_ok(%{items: models}, socket)
-        {:error, reason} -> reply_error("models_list_failed", to_string(reason), socket)
-      end
-    else
-      reply_ok(%{items: []}, socket)
-    end
+    Task.Supervisor.start_child(Avcs.Agent.TaskSupervisor, fn ->
+      reply(socket_ref, models_list_reply())
+    end)
+
+    {:noreply, socket}
   end
 
   def handle_in("approval:respond", payload, socket) do
@@ -542,12 +614,122 @@ defmodule AvcsWeb.AvcsChannel do
     end
   end
 
+  defp models_list_reply do
+    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
+
+    if module_exports?(codex_client, :list_models, 0) do
+      case codex_client.list_models() do
+        {:ok, models} -> {:ok, ok(%{items: models})}
+        {:error, reason} -> {:ok, error("models_list_failed", to_string(reason))}
+      end
+    else
+      {:ok, ok(%{items: []})}
+    end
+  end
+
   defp reply_site_settings_error(reason, socket) do
     code = Avcs.SiteSettings.error_code(reason)
     message = Avcs.SiteSettings.error_message(reason)
     details = Avcs.SiteSettings.error_details(reason)
     reply_error(code, message, details, socket)
   end
+
+  defp message_assets_and_settings(project, payload, turn_settings) do
+    asset_ids = payload["asset_ids"] || []
+
+    with {:ok, data_provider} <- normalize_data_provider(payload["data_provider"]) do
+      turn_settings =
+        if data_provider do
+          Map.put(turn_settings, :data_provider, data_provider)
+        else
+          turn_settings
+        end
+
+      case normalize_mask_edit(project, payload["mask_edit"], asset_ids) do
+        {:ok, nil, asset_ids} ->
+          {:ok, asset_ids, turn_settings}
+
+        {:ok, mask_edit, asset_ids} ->
+          {:ok, asset_ids, Map.put(turn_settings, :mask_edit, mask_edit)}
+
+        {:error, code, message} ->
+          {:error, code, message}
+      end
+    else
+      {:error, reason} ->
+        {:error, Avcs.Agent.DataProvider.error_code(reason),
+         Avcs.Agent.DataProvider.error_message(reason)}
+    end
+  end
+
+  defp normalize_data_provider(nil), do: {:ok, nil}
+
+  defp normalize_data_provider(data_provider) do
+    Avcs.Agent.DataProvider.normalize(data_provider)
+  end
+
+  defp normalize_mask_edit(_project, nil, asset_ids), do: {:ok, nil, asset_ids}
+
+  defp normalize_mask_edit(project, mask_edit, _asset_ids) when is_map(mask_edit) do
+    base_asset_id = clean_id(mask_edit["base_asset_id"] || mask_edit[:base_asset_id])
+    mask_asset_id = clean_id(mask_edit["mask_asset_id"] || mask_edit[:mask_asset_id])
+
+    with {:ok, base_asset} <- require_message_asset(project, base_asset_id, "Base image"),
+         {:ok, mask_asset} <- require_message_asset(project, mask_asset_id, "Mask image"),
+         :ok <- ensure_base_asset(base_asset),
+         :ok <- ensure_mask_asset(mask_asset) do
+      {:ok,
+       %{
+         "mode" => "visual_reference",
+         "base_asset_id" => base_asset_id,
+         "mask_asset_id" => mask_asset_id,
+         "mask_semantics" => "white_edit_black_keep"
+       }, [base_asset_id, mask_asset_id]}
+    else
+      {:error, message} -> {:error, "invalid_mask_edit", message}
+    end
+  end
+
+  defp normalize_mask_edit(_project, _mask_edit, _asset_ids) do
+    {:error, "invalid_mask_edit", "Mask edit payload is invalid"}
+  end
+
+  defp require_message_asset(_project, nil, label), do: {:error, "#{label} is required"}
+
+  defp require_message_asset(project, asset_id, label) do
+    case Avcs.Assets.get_asset(project, asset_id) do
+      {:ok, nil} ->
+        {:error, "#{label} was not found"}
+
+      {:ok, %{"file_path" => path} = asset} ->
+        if is_binary(path) and File.exists?(path) do
+          {:ok, asset}
+        else
+          {:error, "#{label} file is missing"}
+        end
+
+      {:ok, _asset} ->
+        {:error, "#{label} file is missing"}
+
+      {:error, reason} ->
+        {:error, to_string(reason)}
+    end
+  end
+
+  defp ensure_base_asset(%{"source" => "mask"}), do: {:error, "Base image cannot be a mask"}
+  defp ensure_base_asset(_asset), do: :ok
+
+  defp ensure_mask_asset(%{"source" => "mask"}), do: :ok
+  defp ensure_mask_asset(_asset), do: {:error, "Mask image must be a mask asset"}
+
+  defp clean_id(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      id -> id
+    end
+  end
+
+  defp clean_id(_value), do: nil
 
   defp broadcast_threads(project) do
     {:ok, threads} = Avcs.Threads.list_threads(project)

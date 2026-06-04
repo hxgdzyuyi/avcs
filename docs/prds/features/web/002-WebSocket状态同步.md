@@ -32,14 +32,14 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 3. `thread:create`：新会话准备态发送第一条消息时创建 thread；点击铅笔入口不发送该事件。
 4. `thread:select`：切换当前 thread。
 5. `thread:items:list`：读取当前 thread 的聊天内容。
-6. `message:send`：发送用户消息和当前聊天输入区引用的 asset 列表，并触发 Elixir 通过 stdio 调用 Codex app-server。
+6. `message:send`：发送用户消息和当前聊天输入区引用的 asset 列表，并触发 Elixir 通过 stdio 调用 Codex app-server；支持可选 `mask_edit` 元信息。
 7. `assets:list`：读取资产列表。
 8. `assets:reference`：更新当前聊天输入区引用的图片资产。
 9. `assets:select`：更新画板当前选中的图片资产。
 10. `board:items:list`：读取画板对象列表。
 11. `board:item:move`：更新画板对象位置。
 12. `board:item:resize`：更新画板对象显示尺寸。
-13. `board:items:update`：批量更新多个 output board item 的位置和显示尺寸，用于多选移动、对齐、统一尺寸和间距整理。
+13. `board:items:update`：批量更新多个 output board item 的位置、显示尺寸和层级，用于多选移动、对齐、统一尺寸、间距整理和右键层级调整。
 14. `turn:stop`：停止当前 thread 的 active turn；queued turn 取消排队，已运行 turn 通过 Codex app-server `turn/interrupt` 中断。
 
 ## 4. Phoenix HTTP API 对应动作
@@ -50,8 +50,9 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 2. `project:open_folder` 对应输入本地绝对路径，并打开或初始化现有项目文件夹。
 3. `assets:import` 对应导入图片。
 4. `assets:upload` 对应聊天区上传图片。
-5. `assets:scan` 对应扫描项目目录图片。
-6. 图片预览、打开所在文件夹、复制本地路径等文件系统相关动作。
+5. `assets:mask` 对应 Board 预览 dialog 上传本轮 mask PNG。
+6. `assets:scan` 对应扫描项目目录图片。
+7. 图片预览、打开所在文件夹、复制本地路径等文件系统相关动作。
 
 ## 5. 服务端推送事件
 
@@ -59,19 +60,22 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 2. `threads:updated`：thread 列表更新。
 3. `thread:items`：返回或刷新聊天内容。
 4. `agent:run_started`：Agent 开始运行。
-5. `assistant:delta`：Agent 文本流式输出片段。
-6. `item:created`：新增 turn/item。
-7. `tool:updated`：工具调用状态更新。
-8. `asset:created`：新增图片资产。
-9. `assets:updated`：资产列表更新。
-10. `board:item:created`：新增画板对象。
-11. `board:item:updated`：画板对象位置、尺寸或层级更新。
-12. `board:items`：批量变更量较大时刷新当前画板对象列表。
-13. `asset:referenced`：图片资产被加入当前聊天输入引用。
-14. `agent:run_completed`：Agent 运行完成，`status` 可以是 `completed`、`failed` 或 `interrupted`。
-15. `error`：可恢复错误或失败状态。
+5. `agent:thinking_tick`：Codex app-server active turn 期间收到任意可识别事件或响应时推送，用于推进前端 thinking 点阵；payload 只包含 `thread_id`、`turn_id`、`event_name` 和 `status` 等轻量字段。
+6. `assistant:delta`：Agent 文本流式输出片段。
+7. `item:created`：新增 turn/item。
+8. `tool:updated`：工具调用状态更新。
+9. `asset:created`：新增图片资产。
+10. `assets:updated`：资产列表更新。
+11. `board:item:created`：新增画板对象。
+12. `board:item:updated`：画板对象位置、尺寸或层级更新。
+13. `board:items`：批量变更量较大时刷新当前画板对象列表。
+14. `asset:referenced`：图片资产被加入当前聊天输入引用。
+15. `agent:run_completed`：Agent 运行完成，`status` 可以是 `completed`、`failed` 或 `interrupted`。
+16. `error`：可恢复错误或失败状态。
 
 `board:items:update` 成功后，服务端对每个更新对象广播 `board:item:updated`，前端按 id 合并；一次批量操作超过 50 个对象时可额外广播 `board:items` 全量列表。
+
+`message:send.mask_edit` 校验成功后，服务端应把 `asset_ids` 规范为 `[base_asset_id, mask_asset_id]`，并把 `mask_edit` 写入 user message payload；校验失败返回 `invalid_mask_edit`。
 
 ## 6. 状态与错误
 
@@ -84,6 +88,7 @@ UI 必须覆盖：
 5. 重连失败。
 6. 当前请求失败。
 7. 后端返回业务错误。
+8. Mask edit payload 无效或 mask asset 文件丢失。
 
 聊天区和画板区都应展示可恢复的错误信息，避免用户不知道当前失败发生在 Agent、文件系统还是前端加载。
 

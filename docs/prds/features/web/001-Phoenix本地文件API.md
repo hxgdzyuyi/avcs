@@ -39,9 +39,12 @@ MVP 建议覆盖：
 2. 打开或初始化现有项目文件夹：`POST /api/project/open` 接收本地绝对路径 `{ "path": "/absolute/project/folder" }`，创建或复用项目目录结构，并更新 `~/.avcs/avcs.sqlite3`。
 3. 导入图片：接收用户指定的本地图片路径，将文件复制到 `<project>/work/`，计算 hash 去重并写入项目 SQLite。
 4. 聊天区上传图片：接收浏览器 multipart 上传的图片文件，将文件保存到 `<project>/work/`，计算 hash 去重并写入项目 SQLite，返回可加入聊天输入区引用列表的 asset。
-5. 扫描项目图片：默认扫描 `<project>/work/` 和 `<project>/output/` 内允许的图片格式，计算 hash 去重，新增缺失的 asset 记录。
-6. 读取图片预览：通过受控 HTTP 路由返回项目资产文件。
-7. 打开所在文件夹或复制路径：由后端校验 asset 属于当前项目后执行系统操作或返回规范化路径。
+5. 上传 mask 图片：`POST /api/assets/mask` 接收浏览器 multipart 上传的 mask PNG 和 `base_asset_id`，保存到项目内受控临时目录，写入 `source = "mask"` 的 asset。
+6. 扫描项目图片：默认扫描 `<project>/work/` 和 `<project>/output/` 内允许的图片格式，计算 hash 去重，新增缺失的 asset 记录。
+7. 读取图片预览：通过受控 HTTP 路由返回项目资产文件。
+8. 打开所在文件夹或复制路径：由后端校验 asset 属于当前项目后执行系统操作或返回规范化路径。
+8. 项目 SQLite 信息：`GET /api/project/sqlite_info` 只读取当前项目 `.avcs/project.sqlite3` 的状态、大小、修改时间、PRAGMA 信息和关键表行数。
+9. 项目 SQLite 维护：`POST /api/project/sqlite_maintenance` 只作用于当前项目 SQLite；`fast_optimize` 同步执行，`deep_vacuum` 通过后台任务执行并推送任务事件。
 
 ## 4. 路径和权限边界
 
@@ -56,14 +59,18 @@ MVP 建议覆盖：
 
 后端不能接受前端任意本地路径并直接读取或返回。
 
+Mask 上传只能接收浏览器 multipart 文件，不能接收前端提供的任意本地路径；base asset 与 mask asset 都必须归属于当前项目。
+
 ## 5. 与 WebSocket 的关系
 
 文件 API 完成后，由 Elixir 写入项目 SQLite，并通过 WebSocket 推送状态变更。例如：
 
 1. 导入成功后推送 `asset:created`、`assets:updated`。
 2. 上传成功后推送 `asset:referenced`。
-3. 扫描成功后推送 `assets:updated`。
-4. 生成或导入资产创建画板对象后推送 `board:item:created`。
+3. Mask 上传成功后推送 `asset:created` / `assets:updated`，但不创建 board item。
+4. 扫描成功后推送 `assets:updated`。
+5. 生成或导入资产创建画板对象后推送 `board:item:created`。
+5. 深度整理项目 SQLite 时推送 `project:sqlite:maintenance_started` 和 `project:sqlite:maintenance_completed`。
 
 ## 6. 开发代理
 
@@ -88,7 +95,8 @@ Vite 配置使用 `base: "/web/"`，构建开启 manifest，后端通过 manifes
 7. 读写权限不足。
 8. hash 计算失败。
 9. 预览读取失败。
-10. Vite dev server 未启动时，Phoenix 代理返回明确错误。
+10. Mask 不是 PNG、尺寸无法读取、base asset 不存在或不属于当前项目。
+11. Vite dev server 未启动时，Phoenix 代理返回明确错误。
 
 ## 8. 验收标准
 
@@ -98,4 +106,6 @@ Vite 配置使用 `base: "/web/"`，构建开启 manifest，后端通过 manifes
 4. 图片预览通过受控 HTTP 路由返回。
 5. 新建空白项目创建到全局软件设置 `projects.default_root` 下，初始默认值为 `~/Documents/Avcs`，且同名目录自动递增。
 6. 除打开项目和导入源文件入口外，文件操作不能越过当前项目边界。
-7. 开发环境可以通过 `http://localhost:9500/web` 访问前端。
+7. Mask 上传通过 Phoenix API 完成，保存为项目内 `source = "mask"` 的 asset，且不创建画板对象。
+8. 开发环境可以通过 `http://localhost:9500/web` 访问前端。
+8. 项目 SQLite 信息和维护 API 不接受任意数据库路径，只能作用于 Phoenix 当前项目上下文。

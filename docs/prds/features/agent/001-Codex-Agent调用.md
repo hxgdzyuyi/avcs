@@ -46,6 +46,8 @@ codex app-server
 4. Agent 只接收当前 thread、用户输入、聊天输入区当前引用的资产和必要项目元信息。
 5. 图片生成必须真实接入 Codex built-in `image_gen`；MVP 不用 mock/stub 替代图片生成。
 6. Avcs 通过系统提示词限制图片生成风格、输出路径、命名规则和结果回传格式，要求 Agent 将生成图片保存到或回传到当前项目 `output/` 目录可捕获的位置。
+7. 当本轮包含 `mask_edit` 时，Avcs 传入原图和 mask 图两条引用，并在发送给 Codex 的文本中附加视觉参考指令：mask 白色或已标记区域表示需要编辑，黑色或未标记区域表示尽量保持不变。
+8. `mask_edit` 不等同正式图片编辑 API 的 mask 参数；Agent 只能按视觉参考能力执行。
 
 ## 5. 事件映射
 
@@ -56,6 +58,7 @@ Codex app-server 输出需要映射到 Avcs：
 3. `item/*` 映射到用户消息、Assistant 消息、工具调用、工具结果、图片资产和错误。
 4. 工具进度映射到聊天区工具状态行。
 5. 错误通知映射到当前 turn 的 error item 和前端 error 事件。
+6. `mask_edit` 元信息写入本地 user message payload，用于追溯本轮原图与 mask 引用关系。
 
 ## 6. 兼容性
 

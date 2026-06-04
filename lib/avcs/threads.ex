@@ -21,17 +21,38 @@ defmodule Avcs.Threads do
 
   def list_threads(project) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
-      SQLite.all!(
-        db,
-        """
-        SELECT *
-        FROM threads
-        WHERE archived_at IS NULL
-        ORDER BY updated_at DESC, created_at DESC
-        """
-      )
+      list_sidebar_threads(db)
     end)
   end
+
+  def reorder_threads(project, ordered_ids) when is_list(ordered_ids) do
+    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+      normalized_ids =
+        ordered_ids
+        |> Enum.map(&normalize_reorder_id/1)
+        |> Enum.filter(&is_binary/1)
+        |> Enum.map(&String.trim/1)
+        |> Enum.filter(&(&1 != ""))
+
+      with {:ok, ordered_thread_ids} <- validate_thread_reorder_payload(db, normalized_ids) do
+        SQLite.transaction!(db, fn ->
+          ordered_thread_ids
+          |> Enum.with_index()
+          |> Enum.each(fn {thread_id, index} ->
+            SQLite.run!(db, "UPDATE threads SET sidebar_order = ? WHERE id = ?", [
+              index,
+              thread_id
+            ])
+          end)
+        end)
+
+        {:ok, list_sidebar_threads(db)}
+      end
+    end)
+    |> unwrap_sqlite_result()
+  end
+
+  def reorder_threads(_project, _ordered_ids), do: {:error, :invalid_reorder_payload}
 
   def get_thread(project, id) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
@@ -45,15 +66,16 @@ defmodule Avcs.Threads do
       id = Ecto.UUID.generate()
       title = clean_title(title)
       defaults = Avcs.SiteSettings.agent_defaults()
+      sidebar_order = next_thread_sidebar_order(db)
 
       SQLite.run!(
         db,
         """
         INSERT INTO threads (
           id, title, default_model, default_effort, default_approval_policy,
-          default_sandbox_mode, created_at, updated_at
+          default_sandbox_mode, sidebar_order, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
           id,
@@ -62,6 +84,7 @@ defmodule Avcs.Threads do
           defaults.effort,
           defaults.approval_policy,
           defaults.sandbox_mode,
+          sidebar_order || 0,
           now,
           now
         ]
@@ -278,6 +301,58 @@ defmodule Avcs.Threads do
       nil -> nil
       value -> clean_title(value)
     end
+  end
+
+  defp validate_thread_reorder_payload(db, ordered_ids) do
+    threads = SQLite.all!(db, "SELECT id FROM threads WHERE archived_at IS NULL")
+    count_ok? = length(threads) == length(ordered_ids)
+    ids_lookup = MapSet.new(Enum.map(threads, & &1["id"]))
+    all_ids_exist? = Enum.all?(ordered_ids, &MapSet.member?(ids_lookup, &1))
+    no_duplicates? = length(ordered_ids) == length(Enum.uniq(ordered_ids))
+
+    cond do
+      !no_duplicates? || length(ordered_ids) == 0 ->
+        {:error, :invalid_reorder_payload}
+
+      !count_ok? ->
+        {:error, :invalid_reorder_payload}
+
+      !all_ids_exist? ->
+        {:error, :thread_not_found}
+
+      true ->
+        {:ok, ordered_ids}
+    end
+  end
+
+  defp normalize_reorder_id(value) when is_binary(value), do: value
+  defp normalize_reorder_id(_value), do: nil
+
+  defp unwrap_sqlite_result({:ok, {:ok, result}}), do: {:ok, result}
+  defp unwrap_sqlite_result({:ok, {:error, reason}}), do: {:error, reason}
+  defp unwrap_sqlite_result(result), do: result
+
+  defp list_sidebar_threads(db) do
+    SQLite.all!(
+      db,
+      """
+      SELECT *
+      FROM threads
+      WHERE archived_at IS NULL
+      ORDER BY sidebar_order ASC, id ASC
+      """
+    )
+  end
+
+  defp next_thread_sidebar_order(db) do
+    SQLite.scalar!(
+      db,
+      """
+      SELECT COALESCE(MIN(sidebar_order) - 1, 0)
+      FROM threads
+      WHERE archived_at IS NULL
+      """
+    ) || 0
   end
 
   def touch(project, id) do

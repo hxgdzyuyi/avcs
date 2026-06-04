@@ -64,22 +64,70 @@ defmodule Avcs.ProjectsTest do
              older_before["last_opened_at"]
   end
 
-  test "list projects sorts by real project activity before last opened time", %{
+  test "list projects keeps sidebar order while exposing real project activity", %{
     global_db_path: global_db_path,
     projects_dir: projects_dir
   } do
-    {:ok, quiet} = Avcs.Projects.open_project(Path.join(projects_dir, "quiet"))
-    {:ok, active} = Avcs.Projects.open_project(Path.join(projects_dir, "active"))
-    {:ok, _quiet_thread} = Avcs.Threads.create_thread(quiet, "Quiet work")
-    {:ok, _active_thread} = Avcs.Threads.create_thread(active, "Active work")
+    {:ok, first} = Avcs.Projects.open_project(Path.join(projects_dir, "first"))
+    {:ok, second} = Avcs.Projects.open_project(Path.join(projects_dir, "second"))
+    {:ok, _first_thread} = Avcs.Threads.create_thread(first, "First work")
+    {:ok, _second_thread} = Avcs.Threads.create_thread(second, "Second work")
 
-    set_project_times(global_db_path, quiet, "2026-01-02T00:00:00Z")
-    set_project_times(global_db_path, active, "2026-01-01T00:00:00Z")
-    set_thread_activity(active, "2026-01-03T00:00:00Z")
+    set_project_times(global_db_path, first, "2026-01-03T00:00:00Z")
+    set_project_times(global_db_path, second, "2026-01-01T00:00:00Z")
 
     assert {:ok, projects} = Avcs.Projects.list_projects()
-    assert Enum.map(projects, & &1["id"]) == [active["id"], quiet["id"]]
-    assert project_by_id(projects, active["id"])["last_activity_at"] == "2026-01-03T00:00:00Z"
+    assert Enum.map(projects, & &1["id"]) == [second["id"], first["id"]]
+    assert project_by_id(projects, first["id"])["last_activity_at"] == "2026-01-03T00:00:00Z"
+  end
+
+  test "project reorder persists sidebar order and ignores later activity", %{
+    global_db_path: global_db_path,
+    projects_dir: projects_dir
+  } do
+    {:ok, first} = Avcs.Projects.open_project(Path.join(projects_dir, "first"))
+    {:ok, second} = Avcs.Projects.open_project(Path.join(projects_dir, "second"))
+    {:ok, third} = Avcs.Projects.open_project(Path.join(projects_dir, "third"))
+
+    assert {:ok, projects} = Avcs.Projects.list_projects()
+    assert Enum.map(projects, & &1["id"]) == [third["id"], second["id"], first["id"]]
+
+    assert {:ok, reordered} =
+             Avcs.Projects.reorder_projects([first["id"], third["id"], second["id"]])
+
+    assert Enum.map(reordered, & &1["id"]) == [first["id"], third["id"], second["id"]]
+
+    set_project_times(global_db_path, second, "2026-01-04T00:00:00Z")
+
+    assert {:ok, after_activity} = Avcs.Projects.list_projects()
+    assert Enum.map(after_activity, & &1["id"]) == [first["id"], third["id"], second["id"]]
+
+    assert {:ok, selected} = Avcs.Projects.select_project(third["id"])
+    assert selected["id"] == third["id"]
+
+    assert {:ok, after_select} = Avcs.Projects.list_projects()
+    assert Enum.map(after_select, & &1["id"]) == [first["id"], third["id"], second["id"]]
+  end
+
+  test "project reorder rejects invalid payloads and archived ids", %{
+    projects_dir: projects_dir
+  } do
+    {:ok, first} = Avcs.Projects.open_project(Path.join(projects_dir, "first"))
+    {:ok, second} = Avcs.Projects.open_project(Path.join(projects_dir, "second"))
+
+    assert {:error, :invalid_reorder_payload} = Avcs.Projects.reorder_projects([])
+    assert {:error, :invalid_reorder_payload} = Avcs.Projects.reorder_projects([first["id"]])
+
+    assert {:error, :invalid_reorder_payload} =
+             Avcs.Projects.reorder_projects([first["id"], first["id"]])
+
+    assert {:error, :project_not_found} =
+             Avcs.Projects.reorder_projects([first["id"], Ecto.UUID.generate()])
+
+    assert {:ok, _archived} = Avcs.Projects.archive_project(second["id"])
+
+    assert {:error, :invalid_reorder_payload} =
+             Avcs.Projects.reorder_projects([first["id"], second["id"]])
   end
 
   test "opening and selecting a project allows an empty thread list", %{
@@ -150,6 +198,42 @@ defmodule Avcs.ProjectsTest do
     assert {:ok, project} = Avcs.Projects.create_blank_project("Global Root")
     assert project["folder_path"] == Path.join(root, "Global Root")
     assert File.exists?(Path.join([project["folder_path"], ".avcs", "project.sqlite3"]))
+  end
+
+  test "project sqlite info reports file stats, pragmas, and table row counts", %{
+    projects_dir: projects_dir
+  } do
+    {:ok, project} = Avcs.Projects.open_project(Path.join(projects_dir, "sqlite-info"))
+    {:ok, _thread} = Avcs.Threads.create_thread(project, "SQLite info")
+
+    assert {:ok, info} = Avcs.Projects.project_sqlite_info(project)
+    assert info.project_id == project["id"]
+    assert info.db_path == Avcs.Projects.project_db_path(project)
+    assert info.exists == true
+    assert info.status == "available"
+    assert info.size_bytes > 0
+    assert info.file_mtime
+    assert info.sqlite_info.page_size > 0
+    assert info.sqlite_info.journal_mode in ["wal", "delete", "memory", "off"]
+    assert info.sqlite_info.schema_version == "4"
+
+    assert %{rows: rows} = Enum.find(info.table_rows, &(&1.name == "threads"))
+    assert rows >= 1
+  end
+
+  test "project sqlite fast maintenance records optimized timestamp", %{
+    projects_dir: projects_dir
+  } do
+    {:ok, project} = Avcs.Projects.open_project(Path.join(projects_dir, "sqlite-maintenance"))
+
+    assert {:ok, result} =
+             Avcs.Projects.project_sqlite_maintenance(project, "fast_optimize", async: false)
+
+    assert result.status == "completed"
+    assert result.job_id
+
+    assert {:ok, info} = Avcs.Projects.project_sqlite_info(project)
+    assert info.optimized_at
   end
 
   defp set_project_times(global_db_path, project, timestamp) do

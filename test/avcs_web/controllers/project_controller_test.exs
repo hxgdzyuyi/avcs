@@ -47,4 +47,32 @@ defmodule AvcsWeb.ProjectControllerTest do
     assert File.exists?(Path.join([project_dir, ".avcs", "project.sqlite3"]))
     assert File.exists?(Application.fetch_env!(:avcs, :global_db_path))
   end
+
+  test "reads and maintains current project sqlite through HTTP API", %{conn: conn} do
+    project_dir =
+      Path.join(System.tmp_dir!(), "avcs-project-sqlite-#{System.unique_integer([:positive])}")
+
+    conn =
+      post(conn, ~p"/api/project/open", %{
+        "path" => project_dir
+      })
+
+    assert %{"success" => true, "data" => project} = json_response(conn, 200)
+
+    conn = get(conn, ~p"/api/project/sqlite_info")
+    assert %{"success" => true, "data" => info} = json_response(conn, 200)
+    assert info["project_id"] == project["id"]
+    assert info["exists"] == true
+    assert info["status"] == "available"
+    assert is_list(info["table_rows"])
+
+    conn =
+      post(conn, ~p"/api/project/sqlite_maintenance", %{
+        "action" => "fast_optimize"
+      })
+
+    assert %{"success" => true, "data" => result} = json_response(conn, 200)
+    assert result["status"] == "completed"
+    assert result["job_id"]
+  end
 end

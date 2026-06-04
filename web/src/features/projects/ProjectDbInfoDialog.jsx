@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
-import { Database, RefreshCcw, RefreshCw, X } from "lucide-react";
+import { useRef } from "react";
+import { Database, RefreshCw, X } from "lucide-react";
 import IconButton from "../../components/IconButton.jsx";
+import { useModalDialog } from "../../components/useModalDialog.js";
 
 export default function ProjectDbInfoDialog({
   info,
@@ -11,43 +12,11 @@ export default function ProjectDbInfoDialog({
   onRefresh,
   onRunMaintenance,
 }) {
-  const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
-  const closeRef = useRef(onClose);
-
-  useEffect(() => {
-    closeRef.current = onClose;
-  }, [onClose]);
-
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    const previousFocus = document.activeElement;
-
-    document.body.style.overflow = "hidden";
-    closeButtonRef.current?.focus({ preventScroll: true });
-
-    function handleKeyDown(event) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeRef.current();
-        return;
-      }
-
-      if (event.key === "Tab") {
-        trapFocus(event, dialogRef.current);
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      document.body.style.overflow = previousOverflow;
-      if (previousFocus instanceof HTMLElement) {
-        previousFocus.focus({ preventScroll: true });
-      }
-    };
-  }, []);
+  const dialogRef = useModalDialog({
+    onCancel: onClose,
+    initialFocusRef: closeButtonRef,
+  });
 
   const sqliteInfo = info?.sqlite_info || {};
   const tableRows = info?.table_rows || [];
@@ -188,6 +157,16 @@ export default function ProjectDbInfoDialog({
             </button>
           </div>
 
+          <div className="project-db-info-explainer">
+            <p>
+              1. 快速优化（fast_optimize）：执行 <code>PRAGMA wal_checkpoint(TRUNCATE)</code> +{" "}
+              <code>PRAGMA optimize</code>。
+            </p>
+            <p>
+              2. 深度整理（deep_vacuum）：执行 <code>VACUUM</code>。
+            </p>
+          </div>
+
           {isBusy ? (
             <p className="project-db-info-state">
               维护中：{runningAction === "deep_vacuum" ? "deep_vacuum" : "fast_optimize"}
@@ -230,37 +209,4 @@ function numberOrDash(value) {
   if (value === null || value === undefined || value === "") return "—";
   if (typeof value === "number" && Number.isNaN(value)) return "—";
   return String(value);
-}
-
-function trapFocus(event, container) {
-  if (!container) return;
-
-  const focusable = Array.from(
-    container.querySelectorAll(
-      "a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])",
-    ),
-  ).filter((element) => element instanceof HTMLElement);
-
-  if (focusable.length === 0) {
-    event.preventDefault();
-    return;
-  }
-
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  const active = document.activeElement;
-
-  if (event.shiftKey) {
-    if (active === first || !container.contains(active)) {
-      event.preventDefault();
-      last.focus();
-    }
-
-    return;
-  }
-
-  if (active === last || !container.contains(active)) {
-    event.preventDefault();
-    first.focus();
-  }
 }

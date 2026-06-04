@@ -4,7 +4,7 @@ defmodule Avcs.Board do
   alias Avcs.Storage.SQLite
 
   @min_object_size 64.0
-  @update_fields [:x, :y, :display_width, :display_height]
+  @update_fields [:x, :y, :display_width, :display_height, :z_index]
 
   def list_items(project) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
@@ -85,17 +85,9 @@ defmodule Avcs.Board do
         key = Atom.to_string(field)
 
         if Map.has_key?(update, key) do
-          case parse_number(update[key]) do
-            {:ok, value} ->
-              value =
-                if field in [:display_width, :display_height],
-                  do: max(value, @min_object_size),
-                  else: value
-
-              {:cont, Map.put(attrs, field, value)}
-
-            :error ->
-              {:halt, :error}
+          case normalize_field_value(field, update[key]) do
+            {:ok, value} -> {:cont, Map.put(attrs, field, value)}
+            :error -> {:halt, :error}
           end
         else
           {:cont, attrs}
@@ -183,4 +175,28 @@ defmodule Avcs.Board do
   end
 
   defp parse_number(_value), do: :error
+
+  defp normalize_field_value(:z_index, value), do: parse_positive_integer(value)
+
+  defp normalize_field_value(field, value) when field in [:display_width, :display_height] do
+    with {:ok, number} <- parse_number(value) do
+      {:ok, max(number, @min_object_size)}
+    end
+  end
+
+  defp normalize_field_value(_field, value), do: parse_number(value)
+
+  defp parse_positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
+  defp parse_positive_integer(value) when is_integer(value), do: :error
+
+  defp parse_positive_integer(value) when is_binary(value) do
+    value = String.trim(value)
+
+    case Integer.parse(value) do
+      {number, ""} when number > 0 -> {:ok, number}
+      _other -> :error
+    end
+  end
+
+  defp parse_positive_integer(_value), do: :error
 end

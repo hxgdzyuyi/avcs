@@ -113,6 +113,33 @@ defmodule Avcs.Assets do
     end
   end
 
+  def create_mask_image(project, base_asset_id, %Plug.Upload{} = upload, opts \\ []) do
+    with {:ok, base_asset} <- require_asset(project, base_asset_id),
+         :ok <- ensure_png_file(upload.path),
+         {:ok, mask_dimensions} <- require_dimensions(upload.path),
+         :ok <- ensure_mask_dimensions(base_asset, mask_dimensions),
+         {:ok, hash} <- file_hash(upload.path) do
+      target_dir =
+        Path.join([Avcs.Projects.folder_path(project), ".avcs", "cache", "temp", "masks"])
+
+      target_path = Path.join(target_dir, mask_file_name(hash, base_asset, upload.filename))
+
+      if not File.exists?(target_path) do
+        File.mkdir_p!(target_dir)
+        File.cp!(upload.path, target_path)
+      end
+
+      upsert_asset(
+        project,
+        target_path,
+        Keyword.merge(opts,
+          source: "mask",
+          prompt: "Visual edit mask for #{base_asset["file_name"]}"
+        )
+      )
+    end
+  end
+
   def scan_project(project, opts \\ []) do
     sources =
       [
@@ -242,6 +269,8 @@ defmodule Avcs.Assets do
     end
   end
 
+  def image_dimensions(path), do: dimensions(path)
+
   defp image_files(dir) do
     if File.dir?(dir) do
       dir
@@ -339,6 +368,51 @@ defmodule Avcs.Assets do
     if supported_image?(path), do: :ok, else: {:error, "Unsupported image format"}
   end
 
+  defp require_asset(project, id) when is_binary(id) and id != "" do
+    case get_asset(project, id) do
+      {:ok, nil} -> {:error, "Base image was not found"}
+      {:ok, asset} -> {:ok, asset}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp require_asset(_project, _id), do: {:error, "Base image is required"}
+
+  defp ensure_png_file(path) do
+    case File.read(path) do
+      {:ok, <<0x89, "PNG", 13, 10, 26, 10, _rest::binary>>} -> :ok
+      {:ok, _binary} -> {:error, "Mask must be a PNG image"}
+      {:error, reason} -> {:error, "Cannot read mask image: #{inspect(reason)}"}
+    end
+  end
+
+  defp require_dimensions(path) do
+    case dimensions(path) do
+      {width, height}
+      when is_integer(width) and width > 0 and is_integer(height) and height > 0 ->
+        {:ok, {width, height}}
+
+      _dimensions ->
+        {:error, "Mask dimensions could not be read"}
+    end
+  end
+
+  defp ensure_mask_dimensions(base_asset, {mask_width, mask_height}) do
+    base_width = numeric_or_default(base_asset["width"], 0)
+    base_height = numeric_or_default(base_asset["height"], 0)
+
+    cond do
+      base_width <= 0 or base_height <= 0 ->
+        :ok
+
+      base_width == mask_width and base_height == mask_height ->
+        :ok
+
+      true ->
+        {:error, "Mask dimensions must match the base image"}
+    end
+  end
+
   defp file_hash(path) do
     case File.read(path) do
       {:ok, binary} ->
@@ -357,6 +431,32 @@ defmodule Avcs.Assets do
       |> String.trim("-")
 
     "#{String.slice(hash, 0, 16)}-#{base}"
+  end
+
+  defp mask_file_name(hash, base_asset, upload_name) do
+    base =
+      base_asset["file_name"]
+      |> to_string()
+      |> Path.rootname()
+      |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+      |> String.trim("-")
+      |> case do
+        "" -> "image"
+        value -> value
+      end
+
+    suffix =
+      upload_name
+      |> to_string()
+      |> Path.rootname()
+      |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+      |> String.trim("-")
+      |> case do
+        "" -> "mask"
+        value -> value
+      end
+
+    "#{String.slice(hash, 0, 16)}-#{base}-#{suffix}.png"
   end
 
   defp touch_existing_asset(project, asset, opts) do

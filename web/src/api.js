@@ -45,6 +45,13 @@ export function uploadAsset(file) {
   return request("/api/assets/upload", { method: "POST", body });
 }
 
+export function uploadMaskAsset(baseAssetId, file) {
+  const body = new FormData();
+  body.append("base_asset_id", baseAssetId);
+  body.append("file", file);
+  return request("/api/assets/mask", { method: "POST", body });
+}
+
 export function revealAsset(id) {
   return request(`/api/assets/${id}/reveal`, { method: "POST" });
 }

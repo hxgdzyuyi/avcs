@@ -1,0 +1,5 @@
+interface:
+  display_name: "APOD Data Provider"
+  short_description: "Fetch APOD images with metadata"
+  default_prompt: "When user asks about APOD, run the APOD fetch script and return the image path with title, date, explanation."
+  icon_small: "/Users/qingyang/mine-work/avcs/priv/skills/avcs-data-prodiver-apod/assets/icon-small.png"

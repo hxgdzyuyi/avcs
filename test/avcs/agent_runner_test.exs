@@ -150,9 +150,63 @@ defmodule Avcs.Agent.RunnerTest do
     end
   end
 
+  defmodule MaskInstructionCodexClient do
+    def run_turn(_project, _codex_thread_id, text, reference_paths, _on_event, _settings) do
+      send(Application.fetch_env!(:avcs, :agent_runner_test_pid), {
+        :mask_run,
+        text,
+        reference_paths
+      })
+
+      {:ok,
+       %{
+         codex_thread_id: "codex-mask-thread",
+         codex_turn_id: "codex-mask-turn",
+         assistant_text: "",
+         items: [],
+         thread_name: nil
+       }}
+    end
+  end
+
+  defmodule DataProviderInstructionCodexClient do
+    def run_turn(_project, _codex_thread_id, text, _reference_paths, _on_event, _settings) do
+      send(Application.fetch_env!(:avcs, :agent_runner_test_pid), {:provider_run, text})
+
+      {:ok,
+       %{
+         codex_thread_id: "codex-provider-thread",
+         codex_turn_id: "codex-provider-turn",
+         assistant_text: "Done",
+         items: [
+           %{
+             "id" => "provider-1",
+             "type" => "commandExecution",
+             "command" => "python priv/skills/avcs-data-prodiver-apod/scripts/fetch_apod.py",
+             "status" => "completed",
+             "stdout" =>
+               Jason.encode!(%{
+                 "status" => "success",
+                 "data" => %{
+                   "date" => "2026-06-01",
+                   "title" => "APOD title",
+                   "media_type" => "image",
+                   "source" => "api",
+                   "image_path" => "/tmp/apod.png",
+                   "apod_url" => "https://apod.nasa.gov/apod/astropix.html"
+                 }
+               })
+           }
+         ],
+         thread_name: nil
+       }}
+    end
+  end
+
   setup do
     previous_client = Application.get_env(:avcs, :codex_client)
     previous_codex_home = Application.get_env(:avcs, :codex_home)
+    previous_test_pid = Application.get_env(:avcs, :agent_runner_test_pid)
     Application.put_env(:avcs, :codex_client, ThreadNameCodexClient)
 
     project_dir =
@@ -172,6 +226,12 @@ defmodule Avcs.Agent.RunnerTest do
         Application.put_env(:avcs, :codex_home, previous_codex_home)
       else
         Application.delete_env(:avcs, :codex_home)
+      end
+
+      if previous_test_pid do
+        Application.put_env(:avcs, :agent_runner_test_pid, previous_test_pid)
+      else
+        Application.delete_env(:avcs, :agent_runner_test_pid)
       end
 
       File.rm_rf!(project_dir)
@@ -248,6 +308,101 @@ defmodule Avcs.Agent.RunnerTest do
 
     {:ok, items} = Avcs.Turns.list_items(project, thread["id"])
     refute Enum.any?(items, &(&1["type"] == "error"))
+  end
+
+  test "adds visual mask edit instructions to the Codex turn", %{project: project} do
+    Application.put_env(:avcs, :codex_client, MaskInstructionCodexClient)
+    Application.put_env(:avcs, :agent_runner_test_pid, self())
+
+    {:ok, thread} = Avcs.Threads.create_thread(project, "Mask edit thread")
+    base_path = Path.join([project["folder_path"], "output", "base.png"])
+    mask_path = Path.join([project["folder_path"], ".avcs", "cache", "temp", "masks", "mask.png"])
+    File.mkdir_p!(Path.dirname(mask_path))
+    File.write!(base_path, test_png())
+    File.write!(mask_path, test_png_alt())
+    {:ok, base_asset} = Avcs.Assets.upsert_asset(project, base_path, source: "generated")
+    {:ok, mask_asset} = Avcs.Assets.upsert_asset(project, mask_path, source: "mask")
+
+    mask_edit = %{
+      "mode" => "visual_reference",
+      "base_asset_id" => base_asset["id"],
+      "mask_asset_id" => mask_asset["id"],
+      "mask_semantics" => "white_edit_black_keep"
+    }
+
+    {:ok, created} =
+      Avcs.Turns.create_user_turn(
+        project,
+        thread["id"],
+        "Replace the marked area",
+        [base_asset["id"], mask_asset["id"]],
+        mask_edit: mask_edit
+      )
+
+    {:ok, pid} =
+      Avcs.Agent.Runner.start(
+        project,
+        thread["id"],
+        created["turn"]["id"],
+        "Replace the marked area",
+        [base_asset["id"], mask_asset["id"]],
+        %{mask_edit: mask_edit}
+      )
+
+    ref = Process.monitor(pid)
+
+    assert_receive {:mask_run, text, reference_paths}, 1_000
+    assert text =~ "Replace the marked area"
+    assert text =~ "Mask edit reference instructions"
+    assert text =~ "white or marked areas indicate the region to change"
+    assert reference_paths == [base_path, mask_path]
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+  end
+
+  test "adds data provider instructions and persists provider context", %{project: project} do
+    Application.put_env(:avcs, :codex_client, DataProviderInstructionCodexClient)
+    Application.put_env(:avcs, :agent_runner_test_pid, self())
+
+    {:ok, thread} = Avcs.Threads.create_thread(project, "Provider thread")
+
+    data_provider = %{
+      "slug" => "avcs-data-prodiver-apod",
+      "name" => "NASA APOD",
+      "version" => "0.1.0",
+      "loaded" => true
+    }
+
+    {:ok, created} =
+      Avcs.Turns.create_user_turn(
+        project,
+        thread["id"],
+        "Create from APOD",
+        [],
+        data_provider: data_provider
+      )
+
+    {:ok, pid} =
+      Avcs.Agent.Runner.start(
+        project,
+        thread["id"],
+        created["turn"]["id"],
+        "Create from APOD",
+        [],
+        %{data_provider: data_provider}
+      )
+
+    ref = Process.monitor(pid)
+
+    assert_receive {:provider_run, text}, 1_000
+    assert text =~ "Data provider selected for this turn"
+    assert text =~ "fetch_apod.py"
+    assert text =~ "After the provider data is available"
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+
+    {:ok, items} = Avcs.Turns.list_items(project, thread["id"])
+    assert assistant = Enum.find(items, &(&1["type"] == "assistant_message"))
+    assert assistant["payload"]["provider_context"]["provider"]["slug"] == data_provider["slug"]
+    assert assistant["payload"]["provider_context"]["result"]["title"] == "APOD title"
   end
 
   test "persists completed image generation items without large result payload", %{
@@ -469,6 +624,12 @@ defmodule Avcs.Agent.RunnerTest do
   defp test_png do
     Base.decode64!(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+  end
+
+  defp test_png_alt do
+    Base.decode64!(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3teQAAAABJRU5ErkJggg=="
     )
   end
 end

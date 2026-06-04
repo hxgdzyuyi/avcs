@@ -29,6 +29,23 @@ defmodule AvcsWeb.AssetController do
     end)
   end
 
+  def mask(conn, %{"file" => upload, "base_asset_id" => base_asset_id}) do
+    with_project(conn, fn conn, project ->
+      case Avcs.Assets.create_mask_image(project, base_asset_id, upload) do
+        {:ok, asset} ->
+          broadcast_assets(project, asset)
+          ApiResponse.ok(conn, asset)
+
+        {:error, reason} ->
+          ApiResponse.error(conn, 422, "asset_mask_failed", to_string(reason))
+      end
+    end)
+  end
+
+  def mask(conn, _params) do
+    ApiResponse.error(conn, 422, "asset_mask_failed", "Mask image and base asset are required")
+  end
+
   def scan(conn, _params) do
     with_project(conn, fn conn, project ->
       case Avcs.Assets.scan_project(project) do

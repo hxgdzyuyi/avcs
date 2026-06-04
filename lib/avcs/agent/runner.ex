@@ -14,7 +14,8 @@ defmodule Avcs.Agent.Runner do
           thread_id,
           active.turn_id,
           text,
-          asset_ids
+          asset_ids,
+          turn_settings
         )
 
       :none ->
@@ -78,11 +79,28 @@ defmodule Avcs.Agent.Runner do
     end
   end
 
-  defp steer_active_turn(codex_client, project, thread_id, turn_id, text, asset_ids) do
-    with {:ok, item} <- append_steered_user_item(project, thread_id, turn_id, text, asset_ids),
+  defp steer_active_turn(
+         codex_client,
+         project,
+         thread_id,
+         turn_id,
+         text,
+         asset_ids,
+         turn_settings
+       ) do
+    with {:ok, item} <-
+           append_steered_user_item(project, thread_id, turn_id, text, asset_ids, turn_settings),
          {:ok, reference_paths} <-
            resolve_reference_paths(project, asset_ids, thread_id, turn_id),
-         :ok <- steer_codex_turn(codex_client, project, thread_id, text, reference_paths),
+         :ok <-
+           steer_codex_turn(
+             codex_client,
+             project,
+             thread_id,
+             text,
+             reference_paths,
+             turn_settings
+           ),
          {:ok, turn} <- Avcs.Turns.get_turn(project, turn_id) do
       Avcs.Events.broadcast("item:created", %{
         thread_id: thread_id,
@@ -104,20 +122,26 @@ defmodule Avcs.Agent.Runner do
     end
   end
 
-  defp append_steered_user_item(project, thread_id, turn_id, text, asset_ids) do
+  defp append_steered_user_item(project, thread_id, turn_id, text, asset_ids, turn_settings) do
     Avcs.Turns.append_item(project,
       turn_id: turn_id,
       thread_id: thread_id,
       type: "user_message",
       role: "user",
       content: text,
-      payload: %{asset_ids: asset_ids, steered: true}
+      payload: steered_payload(asset_ids, turn_settings)
     )
   end
 
-  defp steer_codex_turn(codex_client, project, thread_id, text, reference_paths) do
+  defp steer_codex_turn(codex_client, project, thread_id, text, reference_paths, turn_settings) do
     if module_exports?(codex_client, :steer_turn, 5) do
-      case codex_client.steer_turn(project, thread_id, text, reference_paths, []) do
+      case codex_client.steer_turn(
+             project,
+             thread_id,
+             agent_text_for(project, text, turn_settings),
+             reference_paths,
+             []
+           ) do
         {:ok, _response} -> :ok
         {:error, reason} -> {:error, reason}
       end
@@ -125,6 +149,73 @@ defmodule Avcs.Agent.Runner do
       {:error, :steer_unsupported}
     end
   end
+
+  defp steered_payload(asset_ids, turn_settings) do
+    %{asset_ids: asset_ids, steered: true}
+    |> maybe_put_mask_edit(mask_edit(turn_settings))
+    |> maybe_put_data_provider(data_provider(turn_settings))
+  end
+
+  defp maybe_put_mask_edit(payload, nil), do: payload
+  defp maybe_put_mask_edit(payload, mask_edit), do: Map.put(payload, :mask_edit, mask_edit)
+
+  defp maybe_put_data_provider(payload, nil), do: payload
+
+  defp maybe_put_data_provider(payload, data_provider),
+    do: Map.put(payload, :data_provider, data_provider)
+
+  defp agent_text_for(project, text, turn_settings) do
+    text
+    |> append_mask_edit_instructions(turn_settings)
+    |> append_data_provider_instructions(project, turn_settings)
+  end
+
+  defp append_mask_edit_instructions(text, turn_settings) do
+    case mask_edit(turn_settings) do
+      nil ->
+        text
+
+      _mask_edit ->
+        """
+        #{text}
+
+        Mask edit reference instructions:
+        - The first referenced image is the base image to edit.
+        - The second referenced image is a mask image.
+        - In the mask image, white or marked areas indicate the region to change.
+        - Black or unmarked areas indicate regions that should remain as close to the base image as possible.
+        - Use the mask as a visual reference. This is not a formal API mask, so preserve unchanged areas as carefully as the available image tool allows.
+        """
+        |> String.trim()
+    end
+  end
+
+  defp append_data_provider_instructions(text, project, turn_settings) do
+    case Avcs.Agent.DataProvider.runner_instructions(project, data_provider(turn_settings)) do
+      nil ->
+        text
+
+      instructions ->
+        """
+        #{text}
+
+        #{instructions}
+        """
+        |> String.trim()
+    end
+  end
+
+  defp mask_edit(turn_settings) when is_map(turn_settings) do
+    Map.get(turn_settings, :mask_edit) || Map.get(turn_settings, "mask_edit")
+  end
+
+  defp mask_edit(_turn_settings), do: nil
+
+  defp data_provider(turn_settings) when is_map(turn_settings) do
+    Map.get(turn_settings, :data_provider) || Map.get(turn_settings, "data_provider")
+  end
+
+  defp data_provider(_turn_settings), do: nil
 
   defp create_and_start_turn(project, thread_id, text, asset_ids, turn_settings, codex_client) do
     status = if pool_managed_client?(codex_client), do: "queued", else: "in_progress"
@@ -171,13 +262,13 @@ defmodule Avcs.Agent.Runner do
         Avcs.Events.broadcast("agent:run_started", %{thread_id: thread_id, turn_id: turn_id})
       end
 
-      on_event = fn event -> forward_event(project, thread_id, turn_id, event) end
+      on_event = fn event -> forward_agent_event(project, thread_id, turn_id, event) end
 
       case run_codex_turn(
              codex_client,
              project,
              thread["codex_thread_id"],
-             text,
+             agent_text_for(project, text, turn_settings),
              reference_paths,
              on_event,
              Map.merge(turn_settings, %{avcs_thread_id: thread_id, avcs_turn_id: turn_id})
@@ -192,6 +283,12 @@ defmodule Avcs.Agent.Runner do
             :ok ->
               sync_thread_title(project, thread_id, Map.get(result, :thread_name))
 
+              provider_context =
+                Avcs.Agent.DataProvider.provider_context(
+                  data_provider(turn_settings),
+                  result.items
+                )
+
               if String.trim(result.assistant_text) != "" do
                 {:ok, item} =
                   Avcs.Turns.append_item(project,
@@ -200,10 +297,12 @@ defmodule Avcs.Agent.Runner do
                     type: "assistant_message",
                     role: "assistant",
                     content: result.assistant_text,
-                    payload: %{
-                      codex_items:
-                        result.items |> Enum.take(50) |> Enum.map(&persistable_codex_item/1)
-                    }
+                    payload:
+                      %{
+                        codex_items:
+                          result.items |> Enum.take(50) |> Enum.map(&persistable_codex_item/1)
+                      }
+                      |> maybe_put_provider_context(provider_context)
                   )
 
                 Avcs.Events.broadcast("item:created", %{
@@ -221,7 +320,8 @@ defmodule Avcs.Agent.Runner do
                 turn_id,
                 result.items,
                 before_hashes,
-                text
+                text,
+                provider_context
               )
 
               Avcs.Threads.touch(project, thread_id)
@@ -312,6 +412,55 @@ defmodule Avcs.Agent.Runner do
         :missing
     end
   end
+
+  defp forward_agent_event(project, thread_id, turn_id, event) do
+    broadcast_thinking_tick(thread_id, turn_id, event)
+    forward_event(project, thread_id, turn_id, event)
+  end
+
+  defp broadcast_thinking_tick(thread_id, turn_id, event) do
+    Avcs.Events.broadcast("agent:thinking_tick", %{
+      thread_id: thread_id,
+      turn_id: turn_id,
+      event_name: thinking_event_name(event),
+      status: thinking_event_status(event)
+    })
+  end
+
+  defp thinking_event_name({:assistant_delta, _delta, _raw}), do: "item/agentMessage/delta"
+  defp thinking_event_name({:item_started, _item, _raw}), do: "item/started"
+  defp thinking_event_name({:item_completed, _item, _raw}), do: "item/completed"
+  defp thinking_event_name({:turn_started, _turn, _raw}), do: "turn/started"
+  defp thinking_event_name({:turn_completed, _turn, _raw}), do: "turn/completed"
+  defp thinking_event_name({:thread_loaded, _thread_id, _raw}), do: "thread/loaded"
+  defp thinking_event_name({:thread_name_updated, _params, _raw}), do: "thread/name/updated"
+
+  defp thinking_event_name({:approval_review_started, _params, _raw}),
+    do: "item/autoApprovalReview/started"
+
+  defp thinking_event_name({:approval_review_completed, _params, _raw}),
+    do: "item/autoApprovalReview/completed"
+
+  defp thinking_event_name({:error, _error, _raw}), do: "error"
+  defp thinking_event_name({:event, %{"method" => method}}) when is_binary(method), do: method
+
+  defp thinking_event_name(event) when is_tuple(event) and tuple_size(event) > 0 do
+    event
+    |> elem(0)
+    |> to_string()
+  end
+
+  defp thinking_event_name(_event), do: "event"
+
+  defp thinking_event_status({:pool_queued, _meta}), do: "queued"
+  defp thinking_event_status({:approval_review_started, _params, _raw}), do: "waiting_approval"
+  defp thinking_event_status({:error, _error, _raw}), do: "error"
+
+  defp thinking_event_status({:turn_completed, turn, _raw}) do
+    turn["status"] || "completed"
+  end
+
+  defp thinking_event_status(_event), do: "running"
 
   defp forward_event(_project, thread_id, turn_id, {:assistant_delta, delta, _raw})
        when delta != "" do
@@ -451,6 +600,14 @@ defmodule Avcs.Agent.Runner do
         item: avcs_item,
         status: status
       })
+
+      persist_image_generation_output_on_item_completed(
+        project,
+        thread_id,
+        turn_id,
+        item,
+        item["prompt"] || item["revisedPrompt"] || item["savedPath"] || "Image generation"
+      )
     end
   end
 
@@ -705,7 +862,15 @@ defmodule Avcs.Agent.Runner do
     end
   end
 
-  defp register_image_outputs(project, thread_id, turn_id, codex_items, before_hashes, prompt) do
+  defp register_image_outputs(
+         project,
+         thread_id,
+         turn_id,
+         codex_items,
+         before_hashes,
+         prompt,
+         provider_context
+       ) do
     paths =
       codex_items
       |> image_paths_from_items()
@@ -715,38 +880,118 @@ defmodule Avcs.Agent.Runner do
 
     paths
     |> Enum.reduce(MapSet.new(), fn path, seen_asset_ids ->
-      case register_image_path(project, path, thread_id, turn_id, prompt) do
-        {:ok, asset} ->
-          if MapSet.member?(seen_asset_ids, asset["id"]) do
-            seen_asset_ids
-          else
-            unless image_asset_item_exists?(project, thread_id, turn_id, asset["id"]) do
-              {:ok, item} =
-                Avcs.Turns.append_item(project,
-                  turn_id: turn_id,
-                  thread_id: thread_id,
-                  type: "image_asset",
-                  role: "assistant",
-                  content: asset["file_name"],
-                  payload: %{asset_id: asset["id"], source_path: path}
-                )
-
-              Avcs.Events.broadcast("item:created", %{
-                thread_id: thread_id,
-                turn_id: turn_id,
-                item: item
-              })
-            end
-
-            Avcs.Events.broadcast("asset:created", %{asset: asset})
-            MapSet.put(seen_asset_ids, asset["id"])
-          end
+      case persist_output_image_asset(
+             project,
+             thread_id,
+             turn_id,
+             path,
+             prompt,
+             provider_context
+           ) do
+        {:ok, asset_id} ->
+          MapSet.put(seen_asset_ids, asset_id)
 
         {:error, reason} ->
           Avcs.Events.broadcast("error", %{message: to_string(reason), scope: "assets"})
           seen_asset_ids
       end
     end)
+  end
+
+  defp maybe_put_provider_context(payload, nil), do: payload
+
+  defp maybe_put_provider_context(payload, provider_context),
+    do: Map.put(payload, :provider_context, provider_context)
+
+  defp provider_context_for_turn(project, turn_id) do
+    case Avcs.Turns.get_turn(project, turn_id) do
+      {:ok, %{"data_provider" => data_provider}} ->
+        Avcs.Agent.DataProvider.provider_context(data_provider)
+
+      _turn ->
+        nil
+    end
+  end
+
+  defp persist_image_generation_output_on_item_completed(
+         project,
+         thread_id,
+         turn_id,
+         item,
+         prompt
+       ) do
+    case item do
+      %{"type" => "imageGeneration", "savedPath" => saved_path}
+      when is_binary(saved_path) and saved_path != "" ->
+        provider_context = provider_context_for_turn(project, turn_id)
+
+        case persist_output_image_asset(
+               project,
+               thread_id,
+               turn_id,
+               saved_path,
+               prompt,
+               provider_context
+             ) do
+          {:ok, _asset_id} ->
+            :ok
+
+          {:error, reason} ->
+            Avcs.Events.broadcast("error", %{
+              thread_id: thread_id,
+              turn_id: turn_id,
+              message: to_string(reason),
+              scope: "assets"
+            })
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp persist_output_image_asset(
+         project,
+         thread_id,
+         turn_id,
+         path,
+         prompt,
+         provider_context
+       ) do
+    path = Path.expand(path)
+
+    if File.exists?(path) do
+      case register_image_path(project, path, thread_id, turn_id, prompt) do
+        {:ok, asset} ->
+          unless image_asset_item_exists?(project, thread_id, turn_id, asset["id"]) do
+            {:ok, item} =
+              Avcs.Turns.append_item(project,
+                turn_id: turn_id,
+                thread_id: thread_id,
+                type: "image_asset",
+                role: "assistant",
+                content: asset["file_name"],
+                payload:
+                  %{asset_id: asset["id"], source_path: path}
+                  |> maybe_put_provider_context(provider_context)
+              )
+
+            Avcs.Events.broadcast("item:created", %{
+              thread_id: thread_id,
+              turn_id: turn_id,
+              item: item
+            })
+          end
+
+          Avcs.Events.broadcast("asset:created", %{asset: asset})
+          {:ok, asset["id"]}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:error, :missing_image_output}
+    end
   end
 
   defp image_paths_from_items(items) do
@@ -1028,7 +1273,8 @@ defmodule Avcs.Agent.Runner do
       local_turn["id"],
       codex_items,
       output_hashes(project),
-      local_turn["user_text"] || ""
+      local_turn["user_text"] || "",
+      Avcs.Agent.DataProvider.provider_context(local_turn["data_provider"], codex_items)
     )
   end
 
