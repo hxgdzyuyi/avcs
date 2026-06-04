@@ -2,9 +2,13 @@
 
 AI Visual Content Studio → Avcs
 
+## Summary
+
+Avcs is a studio tool that uses Codex to generate images.
+
 ## Requirements
 
-- 安装 [Codex CLI](https://developers.openai.com/codex/cli)（用于启动和调用本地 Agent）
+- Install [Codex CLI](https://developers.openai.com/codex/cli) (required to start `codex app-server` and run local agent workflows).
 
 ## Usage
 
