@@ -10,7 +10,8 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_updater::UpdaterExt;
 
 #[cfg(target_os = "linux")]
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -32,6 +33,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let log_path = log_path();
             ensure_parent_dir(&log_path)?;
@@ -45,8 +47,13 @@ pub fn run() {
             let settings_item = menu_item(app_handle, "settings", "Settings", true, "cmd+,");
             let copy_url_item = menu_item(app_handle, "copy-url", "Copy URL", false, "cmd+c");
             let logs_item = menu_item(app_handle, "view-logs", "View Logs", true, "cmd+l");
-            let check_updates_item =
-                menu_item(app_handle, "check-updates", "Check for Updates...", true, "");
+            let check_updates_item = menu_item(
+                app_handle,
+                "check-updates",
+                "Check for Updates...",
+                true,
+                "",
+            );
             let quit_item = menu_item(app_handle, "quit", "Quit", true, "cmd+q");
 
             let tray_menu = Menu::with_items(
@@ -106,6 +113,17 @@ pub fn run() {
                 let _ = app.deep_link().register_all();
             }
 
+            let app_handle_for_updates = app.handle().clone();
+            let update_log_path = log_path.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = check_for_updates_on_boot(app_handle_for_updates).await {
+                    write_log(
+                        &update_log_path,
+                        &format!("failed to check for updates on boot: {error}"),
+                    );
+                }
+            });
+
             let handle = app.handle().clone();
             pubsub.subscribe("messages", move |msg| {
                 if let Some(url) = msg.strip_prefix(b"ready:") {
@@ -114,7 +132,10 @@ pub fn run() {
                 } else {
                     write_log(
                         &handle.state::<AppState>().log_path,
-                        &format!("unexpected desktop message: {}", String::from_utf8_lossy(msg)),
+                        &format!(
+                            "unexpected desktop message: {}",
+                            String::from_utf8_lossy(msg)
+                        ),
                     );
                 }
             });
@@ -225,7 +246,10 @@ impl AppState {
                 .pubsub
                 .broadcast("messages", format!("open:{url}").as_bytes())
             {
-                write_log(&self.log_path, &format!("failed to publish open event: {error}"));
+                write_log(
+                    &self.log_path,
+                    &format!("failed to publish open event: {error}"),
+                );
             }
             return;
         }
@@ -375,7 +399,10 @@ fn monitor_release(
 
         if let Some(status) = status {
             let code = status.code().unwrap_or(1);
-            write_log(&log_path, &format!("Phoenix release exited with status {code}"));
+            write_log(
+                &log_path,
+                &format!("Phoenix release exited with status {code}"),
+            );
             if code != 0 {
                 show_exit_dialog(&app_handle, code, &log_path);
             }
@@ -430,8 +457,7 @@ fn menu_item(
         None
     };
 
-    MenuItem::with_id(app_handle, id, label, is_enabled, accel)
-        .expect("failed to create menu item")
+    MenuItem::with_id(app_handle, id, label, is_enabled, accel).expect("failed to create menu item")
 }
 
 fn show_exit_dialog(handle: &AppHandle, code: i32, log_path: &Path) {
@@ -490,12 +516,85 @@ fn normalize_open_url(input: &str) -> Option<String> {
     }
 }
 
+async fn check_for_updates_on_boot(app: AppHandle) -> tauri_plugin_updater::Result<()> {
+    if let Some(update) = app.updater()?.check().await? {
+        let should_install = app
+            .dialog()
+            .message(format!(
+                "Version {} is available!\n\nWould you like to download and install it now?",
+                update.version
+            ))
+            .kind(MessageDialogKind::Info)
+            .title("Update Available")
+            .buttons(MessageDialogButtons::OkCancel)
+            .blocking_show();
+
+        if should_install {
+            install_update(app, update).await;
+        }
+    }
+
+    Ok(())
+}
+
 fn check_for_updates(app: AppHandle) {
-    app.dialog()
-        .message("Updates are not configured for this development build.")
-        .kind(MessageDialogKind::Info)
-        .title("Updates Not Configured")
-        .blocking_show();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = check_for_updates_async(app.clone()).await {
+            show_error_dialog(
+                &app,
+                "Update Check Failed",
+                format!("Failed to check for updates: {error}"),
+            );
+        }
+    });
+}
+
+async fn check_for_updates_async(app: AppHandle) -> tauri_plugin_updater::Result<()> {
+    if let Some(update) = app.updater()?.check().await? {
+        let should_install = app
+            .dialog()
+            .message(format!(
+                "Version {} is available!\n\nWould you like to download and install it now?",
+                update.version
+            ))
+            .kind(MessageDialogKind::Info)
+            .title("Update Available")
+            .buttons(MessageDialogButtons::OkCancel)
+            .blocking_show();
+
+        if should_install {
+            install_update(app, update).await;
+        }
+    } else {
+        app.dialog()
+            .message(format!(
+                "You're running the latest version:\n\nv{}",
+                app.package_info().version
+            ))
+            .kind(MessageDialogKind::Info)
+            .title("No Updates Available")
+            .blocking_show();
+    }
+
+    Ok(())
+}
+
+async fn install_update(app: AppHandle, update: tauri_plugin_updater::Update) {
+    match update.download_and_install(|_, _| {}, || {}).await {
+        Ok(()) => {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.terminate();
+            }
+            app.restart();
+        }
+        Err(error) => {
+            show_error_dialog(
+                &app,
+                "Update Failed",
+                format!("Failed to install update: {error}"),
+            );
+        }
+    }
 }
 
 fn log_path() -> PathBuf {
@@ -503,7 +602,10 @@ fn log_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    home.join("Library").join("Logs").join(APP_NAME).join("avcs.log")
+    home.join("Library")
+        .join("Logs")
+        .join(APP_NAME)
+        .join("avcs.log")
 }
 
 fn ensure_parent_dir(path: &Path) -> tauri::Result<()> {

@@ -19,7 +19,6 @@ jobs:
     name: Build and release macOS Apple Silicon app
     runs-on: macos-15
     env:
-      ENABLE_APP_SIGNING: "${{ vars.ENABLE_APP_SIGNING || 'true' }}"
       APPLE_SIGNING_IDENTITY: "${{ vars.APPLE_SIGNING_IDENTITY || '-' }}"
       APPLE_SIGNING_ENTITLEMENTS: "${{ vars.APPLE_SIGNING_ENTITLEMENTS || '' }}"
 
@@ -70,58 +69,6 @@ jobs:
             cargo-tauri --version
           fi
 
-      - name: Build app
-        shell: bash
-        run: rel/app/tauri.sh build --target aarch64-apple-darwin
-
-      - name: Sign app bundle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          app_path="rel/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Avcs.app"
-          if [ "${ENABLE_APP_SIGNING}" != "true" ]; then
-            echo "ENABLE_APP_SIGNING is ${ENABLE_APP_SIGNING}. Skip app signing."
-            exit 0
-          fi
-
-          signing_identity="${APPLE_SIGNING_IDENTITY:-"-"}"
-          echo "Signing app with identity: ${signing_identity}"
-
-          args=(
-            "--force"
-            "--deep"
-            "--options"
-            "runtime"
-          )
-
-          if [ -n "${APPLE_SIGNING_ENTITLEMENTS}" ]; then
-            args+=("--entitlements" "${APPLE_SIGNING_ENTITLEMENTS}")
-          fi
-
-          args+=("--sign" "${signing_identity}" "${app_path}")
-          codesign "${args[@]}"
-          codesign --verify --deep --strict "${app_path}"
-          if [ "${signing_identity}" != "-" ]; then
-            spctl --assess --type execute "${app_path}"
-          else
-            echo "Skip spctl assessment for ad-hoc signing identity."
-          fi
-
-      - name: Zip app bundle
-        shell: bash
-        run: |
-          ditto -c -k --keepParent \
-            rel/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Avcs.app \
-            Avcs-macos-aarch64.app.zip
-
-      - name: Upload app artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: Avcs-macos-aarch64.app
-          path: Avcs-macos-aarch64.app.zip
-          if-no-files-found: error
-
       - name: Resolve release tag
         id: release
         shell: bash
@@ -143,8 +90,10 @@ jobs:
           notes="$(cat <<EOF
           macOS Apple Silicon build for ${tag}.
 
-          This app is signed before packaging using codesign (identity: ${APPLE_SIGNING_IDENTITY}),
-          with runtime options enabled. It is not notarized.
+          The Tauri build generates updater artifacts for macOS Apple Silicon:
+          latest.json, Avcs.app.tar.gz, and Avcs.app.tar.gz.sig.
+
+          The app is not notarized.
           EOF
           )"
 
@@ -162,7 +111,53 @@ jobs:
             fi
           fi
 
-      - name: Upload release assets
+      - name: Build Tauri app and upload updater artifacts
+        uses: tauri-apps/tauri-action@v0.6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MIX_ENV: prod
+          MIX_TARGET: app
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_ENTITLEMENTS: ${{ env.APPLE_SIGNING_ENTITLEMENTS }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: rel/app
+          tauriScript: ./tauri.sh
+          args: --target aarch64-apple-darwin
+          tagName: ${{ steps.release.outputs.tag }}
+          releaseName: ${{ steps.release.outputs.tag }}
+          releaseDraft: ${{ github.event_name != 'workflow_dispatch' }}
+          assetNamePattern: "Avcs-[platform]-[arch][ext]"
+
+      - name: Verify app bundle signing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          app_path="rel/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Avcs.app"
+          codesign --verify --deep --strict "${app_path}"
+          if [ "${APPLE_SIGNING_IDENTITY}" != "-" ]; then
+            spctl --assess --type execute "${app_path}"
+          else
+            echo "Skip spctl assessment for ad-hoc signing identity."
+          fi
+
+      - name: Zip app bundle
+        shell: bash
+        run: |
+          ditto -c -k --keepParent \
+            rel/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Avcs.app \
+            Avcs-macos-aarch64.app.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Avcs-macos-aarch64.app
+          path: Avcs-macos-aarch64.app.zip
+          if-no-files-found: error
+
+      - name: Upload manual release asset
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

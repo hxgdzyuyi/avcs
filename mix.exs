@@ -1,10 +1,12 @@
 defmodule Avcs.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+
   def project do
     [
       app: :avcs,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.15",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -65,6 +67,19 @@ defmodule Avcs.MixProject do
         rel_templates_path: "rel/app"
       ]
     ]
+  end
+
+  if Mix.target() == :app do
+    {cargo_output, 0} = System.cmd("cargo", ["pkgid"], cd: "#{__DIR__}/rel/app/src-tauri")
+    [_, cargo_version] = Regex.run(~r/#.+@(.+)$/, String.trim(cargo_output))
+
+    if @version != cargo_version do
+      Mix.raise("""
+      Version mismatch:
+      mix.exs:    #{@version}
+      Cargo.toml: #{cargo_version}
+      """)
+    end
   end
 
   # Aliases are shortcuts or tasks specific to the current project.

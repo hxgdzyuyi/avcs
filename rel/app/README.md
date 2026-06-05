@@ -25,9 +25,29 @@ the settings page and `avcs://open?path=/absolute/project/folder` to
 `/web/?project_path=...`, where the browser app opens the project through the
 existing Phoenix API.
 
-The updater menu is present, but this development build does not initialize the
-Tauri updater runtime until a release endpoint, public key, signing, and
-notarization flow are configured.
+The macOS Apple Silicon updater is enabled through Tauri's updater plugin. It
+checks this GitHub release endpoint:
+
+```text
+https://github.com/hxgdzyuyi/avcs/releases/latest/download/latest.json
+```
+
+The updater public key committed in `src-tauri/tauri.conf.json` is:
+
+```text
+dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ5NzEwRUJDOUVDNDc0RUEKUldUcWRNU2V2QTV4MlNDQUc0UXJiTUNWemtBNFNwVFZuNzZ0YkJHUkRraXJ1TTY2NlMwbnpDTG0K
+```
+
+GitHub Actions release builds require these repository secrets:
+
+```text
+TAURI_SIGNING_PRIVATE_KEY
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+```
+
+The `Generate Tauri updater key` workflow is only a helper for one-time key
+generation or rotation. Once the secrets are configured, release publishing is
+handled by `.github/workflows/desktop-macos.yml`.
 
 The app bundle is written to:
 
@@ -35,6 +55,7 @@ The app bundle is written to:
 rel/app/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/Avcs.app
 ```
 
-The bundle is unsigned and not notarized. macOS may block downloaded artifacts
-with an unidentified developer warning; that is expected until Developer ID
-signing and notarization are added in a later plan.
+The release workflow uploads updater artifacts (`latest.json`, `.app.tar.gz`,
+and `.sig`) plus the manual `Avcs-macos-aarch64.app.zip` download. The app is
+not notarized, so macOS may still show an unidentified developer warning for
+downloaded artifacts.
