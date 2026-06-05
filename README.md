@@ -1,10 +1,10 @@
 # Avcs
 
-<p align="center"><b>English</b> · <a href="docs/i18n/README.zh-CN.md">简体中文</a></p>
-
 AI Visual Content Studio → Avcs
 
 ![Avcs Codex Image Studio banner](docs/assets/avcs-codex-image-studio-banner-v2.webp)
+
+<p align="center"><b>English</b> · <a href="docs/i18n/README.zh-CN.md">简体中文</a></p>
 
 ## Summary
 
