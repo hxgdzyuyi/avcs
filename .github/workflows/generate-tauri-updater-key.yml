@@ -1,0 +1,131 @@
+name: Generate Tauri updater key
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Generate and store updater signing key
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.REPO_SECRETS_WRITE_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Check bootstrap token
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            cat <<'EOF' >&2
+          Missing REPO_SECRETS_WRITE_TOKEN.
+
+          Create a temporary fine-grained PAT with repository "Secrets: Read and write",
+          save it as the repository secret REPO_SECRETS_WRITE_TOKEN, run this workflow,
+          then delete that temporary token and secret.
+          EOF
+            exit 1
+          fi
+
+      - name: Install Tauri CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! command -v cargo-tauri > /dev/null 2>&1; then
+            cargo install tauri-cli --version "=2.8.0" --locked
+          fi
+
+          cargo-tauri --version
+
+      - name: Generate updater key and store secrets
+        id: tauri_key
+        shell: bash
+        working-directory: rel/app/src-tauri
+        run: |
+          set -euo pipefail
+
+          key_path="${RUNNER_TEMP}/avcs-tauri-updater.key"
+          public_key_path="${key_path}.pub"
+          signer_output="${RUNNER_TEMP}/tauri-signer-output.txt"
+          password="$(openssl rand -base64 48 | tr -d '\n')"
+
+          echo "::add-mask::${password}"
+
+          cargo tauri signer generate \
+            --ci \
+            --force \
+            --write-keys "${key_path}" \
+            --password "${password}" \
+            | tee "${signer_output}"
+
+          if [ ! -s "${key_path}" ]; then
+            echo "Private key was not generated at ${key_path}" >&2
+            exit 1
+          fi
+
+          if [ ! -s "${public_key_path}" ]; then
+            public_key="$(
+              grep -E '^[A-Za-z0-9+/=]{80,}$' "${signer_output}" \
+                | tail -n 1 \
+                | tr -d '\r\n'
+            )"
+
+            if [ -z "${public_key}" ]; then
+              echo "Public key was not generated at ${public_key_path} and could not be parsed from signer output." >&2
+              exit 1
+            fi
+
+            printf '%s' "${public_key}" > "${public_key_path}"
+          fi
+
+          gh secret set TAURI_SIGNING_PRIVATE_KEY \
+            --repo "${GITHUB_REPOSITORY}" \
+            < "${key_path}"
+
+          gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+            --repo "${GITHUB_REPOSITORY}" \
+            --body "${password}"
+
+          public_out="${RUNNER_TEMP}/tauri-updater-public-key.txt"
+          tr -d '\r\n' < "${public_key_path}" > "${public_out}"
+
+          {
+            echo "public_key_file=${public_out}"
+            echo "public_key_sha256=$(sha256sum "${public_out}" | awk '{print $1}')"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Upload public key artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tauri-updater-public-key
+          path: ${{ steps.tauri_key.outputs.public_key_file }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Write summary
+        shell: bash
+        run: |
+          cat <<EOF >> "${GITHUB_STEP_SUMMARY}"
+          ### Tauri updater key generated
+
+          Repository secrets written:
+
+          - \`TAURI_SIGNING_PRIVATE_KEY\`
+          - \`TAURI_SIGNING_PRIVATE_KEY_PASSWORD\`
+
+          Public key artifact:
+
+          - \`tauri-updater-public-key\`
+          - SHA-256: \`${{ steps.tauri_key.outputs.public_key_sha256 }}\`
+
+          Copy the public key into \`rel/app/src-tauri/tauri.conf.json\` under \`plugins.updater.pubkey\`.
+
+          After confirming the two Tauri secrets exist, delete the temporary \`REPO_SECRETS_WRITE_TOKEN\` secret and revoke the PAT used for it.
+          EOF
