@@ -16,7 +16,7 @@ Avcs is a studio tool that uses Codex to generate images.
 
 ## Usage
 
-![Usage guide](docs/assets/avcs-usage-guide.webp)
+![Usage guide](docs/assets/avcs-usage-guide-v2.webp)
 
 
 ## Architecture

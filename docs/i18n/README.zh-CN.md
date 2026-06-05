@@ -16,7 +16,7 @@ Avcs 是一个使用 Codex 生成图片的工作室工具。
 
 ## 使用方式
 
-![使用指南](../assets/avcs-usage-guide.webp)
+![使用指南](../assets/avcs-usage-guide-v2.webp)
 
 
 ## 架构
