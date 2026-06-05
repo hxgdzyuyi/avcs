@@ -2,33 +2,36 @@ name: Generate Tauri updater key
 
 on:
   workflow_dispatch:
+    inputs:
+      show_private_key:
+        description: "Type SHOW_PRIVATE_KEY to print private key material in the workflow summary."
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   generate:
-    name: Generate and store updater signing key
+    name: Generate updater signing key
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.REPO_SECRETS_WRITE_TOKEN }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Check bootstrap token
+      - name: Confirm private key disclosure
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -z "${GH_TOKEN:-}" ]; then
+          if [ "${{ inputs.show_private_key }}" != "SHOW_PRIVATE_KEY" ]; then
             cat <<'EOF' >&2
-          Missing REPO_SECRETS_WRITE_TOKEN.
+          This workflow prints Tauri updater private key material to the workflow summary
+          and stores it in a short-lived artifact.
 
-          Create a temporary fine-grained PAT with repository "Secrets: Read and write",
-          save it as the repository secret REPO_SECRETS_WRITE_TOKEN, run this workflow,
-          then delete that temporary token and secret.
+          Re-run it with show_private_key=SHOW_PRIVATE_KEY if you really want to generate
+          a copyable key pair this way.
           EOF
             exit 1
           fi
@@ -44,7 +47,7 @@ jobs:
 
           cargo-tauri --version
 
-      - name: Generate updater key and store secrets
+      - name: Generate updater key material
         id: tauri_key
         shell: bash
         working-directory: rel/app/src-tauri
@@ -55,8 +58,6 @@ jobs:
           public_key_path="${key_path}.pub"
           signer_output="${RUNNER_TEMP}/tauri-signer-output.txt"
           password="$(openssl rand -base64 48 | tr -d '\n')"
-
-          echo "::add-mask::${password}"
 
           cargo tauri signer generate \
             --ci \
@@ -85,47 +86,83 @@ jobs:
             printf '%s' "${public_key}" > "${public_key_path}"
           fi
 
-          gh secret set TAURI_SIGNING_PRIVATE_KEY \
-            --repo "${GITHUB_REPOSITORY}" \
-            < "${key_path}"
-
-          gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
-            --repo "${GITHUB_REPOSITORY}" \
-            --body "${password}"
-
           public_out="${RUNNER_TEMP}/tauri-updater-public-key.txt"
+          private_out="${RUNNER_TEMP}/TAURI_SIGNING_PRIVATE_KEY.txt"
+          password_out="${RUNNER_TEMP}/TAURI_SIGNING_PRIVATE_KEY_PASSWORD.txt"
+          bundle_out="${RUNNER_TEMP}/tauri-updater-key-material.txt"
+
           tr -d '\r\n' < "${public_key_path}" > "${public_out}"
+          cp "${key_path}" "${private_out}"
+          printf '%s' "${password}" > "${password_out}"
+
+          {
+            echo "TAURI_SIGNING_PRIVATE_KEY:"
+            cat "${private_out}"
+            echo
+            echo
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD:"
+            cat "${password_out}"
+            echo
+            echo
+            echo "TAURI_UPDATER_PUBLIC_KEY:"
+            cat "${public_out}"
+            echo
+          } > "${bundle_out}"
 
           {
             echo "public_key_file=${public_out}"
+            echo "private_key_file=${private_out}"
+            echo "password_file=${password_out}"
+            echo "bundle_file=${bundle_out}"
             echo "public_key_sha256=$(sha256sum "${public_out}" | awk '{print $1}')"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Upload public key artifact
+      - name: Upload key material artifact
         uses: actions/upload-artifact@v7
         with:
-          name: tauri-updater-public-key
-          path: ${{ steps.tauri_key.outputs.public_key_file }}
+          name: tauri-updater-key-material
+          path: |
+            ${{ steps.tauri_key.outputs.bundle_file }}
+            ${{ steps.tauri_key.outputs.public_key_file }}
+            ${{ steps.tauri_key.outputs.private_key_file }}
+            ${{ steps.tauri_key.outputs.password_file }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
       - name: Write summary
         shell: bash
         run: |
+          bundle="${{ steps.tauri_key.outputs.bundle_file }}"
+          private_key="$(sed -n '/^TAURI_SIGNING_PRIVATE_KEY:$/,/^$/p' "${bundle}" | sed '1d;$d')"
+          password="$(sed -n '/^TAURI_SIGNING_PRIVATE_KEY_PASSWORD:$/,/^$/p' "${bundle}" | sed '1d;$d')"
+          public_key="$(sed -n '/^TAURI_UPDATER_PUBLIC_KEY:$/,/^$/p' "${bundle}" | sed '1d;$d')"
+
           cat <<EOF >> "${GITHUB_STEP_SUMMARY}"
           ### Tauri updater key generated
 
-          Repository secrets written:
+          Copy these values into repository Actions secrets:
 
-          - \`TAURI_SIGNING_PRIVATE_KEY\`
-          - \`TAURI_SIGNING_PRIVATE_KEY_PASSWORD\`
+          **TAURI_SIGNING_PRIVATE_KEY**
 
-          Public key artifact:
+          \`\`\`text
+          ${private_key}
+          \`\`\`
 
-          - \`tauri-updater-public-key\`
-          - SHA-256: \`${{ steps.tauri_key.outputs.public_key_sha256 }}\`
+          **TAURI_SIGNING_PRIVATE_KEY_PASSWORD**
 
-          Copy the public key into \`rel/app/src-tauri/tauri.conf.json\` under \`plugins.updater.pubkey\`.
+          \`\`\`text
+          ${password}
+          \`\`\`
 
-          After confirming the two Tauri secrets exist, delete the temporary \`REPO_SECRETS_WRITE_TOKEN\` secret and revoke the PAT used for it.
+          Copy this public key into \`rel/app/src-tauri/tauri.conf.json\` under \`plugins.updater.pubkey\`:
+
+          \`\`\`text
+          ${public_key}
+          \`\`\`
+
+          Public key SHA-256: \`${{ steps.tauri_key.outputs.public_key_sha256 }}\`
+
+          A one-day artifact named \`tauri-updater-key-material\` contains the same values.
+
+          Treat this run as sensitive. Delete the artifact after copying the values if you do not want it available for the full retention window.
           EOF

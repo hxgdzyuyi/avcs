@@ -4,7 +4,7 @@
 
 AI Visual Content Studio → Avcs
 
-![Avcs Codex Image Studio banner](../assets/avcs-codex-image-studio-banner.webp)
+![Avcs Codex Image Studio banner](../assets/avcs-codex-image-studio-banner-v2.webp)
 
 ## 概览
 
