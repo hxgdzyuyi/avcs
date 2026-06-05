@@ -21,6 +21,7 @@ defmodule Avcs.Board do
         FROM board_items
         JOIN assets ON assets.id = board_items.asset_id
         WHERE assets.relative_path LIKE 'output/%'
+          AND board_items.invalidated_at IS NULL
         ORDER BY board_items.z_index ASC, board_items.created_at ASC
         """
       )
@@ -118,6 +119,7 @@ defmodule Avcs.Board do
         JOIN assets ON assets.id = board_items.asset_id
         WHERE board_items.id IN (#{placeholders})
           AND assets.relative_path LIKE 'output/%'
+          AND board_items.invalidated_at IS NULL
         """,
         ids
       )
@@ -157,6 +159,7 @@ defmodule Avcs.Board do
       FROM board_items
       JOIN assets ON assets.id = board_items.asset_id
       WHERE assets.relative_path LIKE 'output/%'
+        AND board_items.invalidated_at IS NULL
       ORDER BY board_items.z_index ASC, board_items.created_at ASC
       """
     )

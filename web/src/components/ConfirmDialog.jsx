@@ -3,12 +3,15 @@ import { AlertTriangle, Info, X } from "lucide-react";
 import IconButton from "./IconButton.jsx";
 import { useModalDialog } from "./useModalDialog.js";
 
+const defaultT = (key, _params = {}, fallback = key) => fallback;
+
 export default function ConfirmDialog({
   title,
   message,
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   tone = "default",
+  t = defaultT,
   onConfirm,
   onCancel,
 }) {
@@ -49,7 +52,7 @@ export default function ConfirmDialog({
             {message ? <p id={messageId}>{message}</p> : null}
           </div>
           <IconButton
-            label="Close confirmation"
+            label={t("common.close")}
             className="ghost confirm-dialog-close"
             onClick={onCancel}
           >

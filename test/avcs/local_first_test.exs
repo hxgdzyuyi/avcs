@@ -133,6 +133,80 @@ defmodule Avcs.LocalFirstTest do
              Avcs.Board.update_items(project, [%{"id" => first["id"], "z_index" => 0}])
   end
 
+  test "new output board items are placed near the relevant generated group", %{
+    project: project,
+    project_dir: project_dir
+  } do
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Board placement")
+
+    assert {:ok, first_turn} =
+             Avcs.Turns.create_user_turn(project, thread["id"], "First group", [])
+
+    first_path = write_output_image(project_dir, "first.png", 1)
+    assert {:ok, first_asset} = upsert_generated(project, first_path, thread["id"], first_turn)
+    assert {:ok, [first_item]} = Avcs.Board.list_items(project)
+    assert first_item["asset_id"] == first_asset["id"]
+    assert first_item["x"] == 72.0
+    assert first_item["y"] == 72.0
+    assert first_item["z_index"] == 1
+
+    second_path = write_output_image(project_dir, "second.png", 2)
+    assert {:ok, second_asset} = upsert_generated(project, second_path, thread["id"], first_turn)
+    assert {:ok, board_items} = Avcs.Board.list_items(project)
+    second_item = board_item_for_asset(board_items, second_asset["id"])
+    assert second_item["x"] == first_item["x"] + first_item["display_width"] + 24.0
+    assert second_item["y"] == first_item["y"]
+    assert second_item["z_index"] == 2
+
+    assert {:ok, moved_items} =
+             Avcs.Board.update_items(project, [
+               %{"id" => second_item["id"], "x" => 1300, "y" => 400}
+             ])
+
+    moved_second = board_item_for_asset(moved_items, second_asset["id"])
+
+    third_path = write_output_image(project_dir, "third.png", 3)
+    assert {:ok, third_asset} = upsert_generated(project, third_path, thread["id"], first_turn)
+    assert {:ok, board_items} = Avcs.Board.list_items(project)
+    third_item = board_item_for_asset(board_items, third_asset["id"])
+    assert third_item["x"] == first_item["x"]
+    assert third_item["y"] == moved_second["y"] + moved_second["display_height"] + 24.0
+    assert third_item["z_index"] == 3
+
+    assert {:ok, second_turn} =
+             Avcs.Turns.create_user_turn(project, thread["id"], "Second group", [])
+
+    fourth_path = write_output_image(project_dir, "fourth.png", 4)
+    assert {:ok, fourth_asset} = upsert_generated(project, fourth_path, thread["id"], second_turn)
+    assert {:ok, board_items} = Avcs.Board.list_items(project)
+    fourth_item = board_item_for_asset(board_items, fourth_asset["id"])
+    assert fourth_item["x"] == first_item["x"]
+    assert fourth_item["y"] == third_item["y"] + third_item["display_height"] + 72.0
+    assert fourth_item["z_index"] == 4
+  end
+
+  test "invalidated board items do not anchor new output placement or z-index", %{
+    project: project,
+    project_dir: project_dir
+  } do
+    first_path = write_output_image(project_dir, "invalidated-anchor.png", 11)
+    assert {:ok, _asset} = Avcs.Assets.upsert_asset(project, first_path, source: "generated")
+    assert {:ok, [invalidated_item]} = Avcs.Board.list_items(project)
+
+    invalidate_board_item(project, invalidated_item["id"])
+
+    second_path = write_output_image(project_dir, "visible-after-invalidated.png", 12)
+
+    assert {:ok, second_asset} =
+             Avcs.Assets.upsert_asset(project, second_path, source: "generated")
+
+    assert {:ok, [visible_item]} = Avcs.Board.list_items(project)
+    assert visible_item["asset_id"] == second_asset["id"]
+    assert visible_item["x"] == 72.0
+    assert visible_item["y"] == 72.0
+    assert visible_item["z_index"] == 1
+  end
+
   test "import and upload reuse an existing hash without copying another project file", %{
     project: project,
     project_dir: project_dir
@@ -229,7 +303,7 @@ defmodule Avcs.LocalFirstTest do
 
     assert {:ok, []} = Avcs.Turns.list_items(project, thread["id"])
     assert {:ok, info} = Avcs.Projects.project_sqlite_info(project)
-    assert info.sqlite_info.schema_version == "4"
+    assert info.sqlite_info.schema_version == "5"
 
     assert {:ok, created} =
              Avcs.Turns.create_user_turn(project, thread["id"], "After migration", [])
@@ -292,6 +366,111 @@ defmodule Avcs.LocalFirstTest do
     assert around.page.has_more_before == true
     assert around.page.has_more_after == true
     assert around.page.at_latest == false
+  end
+
+  test "editing a user message invalidates later local path and board items", %{
+    project: project,
+    project_dir: project_dir
+  } do
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Edit rerun")
+
+    assert {:ok, first} =
+             Avcs.Turns.create_user_turn(project, thread["id"], "Original prompt", [])
+
+    assert {:ok, first_assistant} =
+             Avcs.Turns.append_item(project,
+               turn_id: first["turn"]["id"],
+               thread_id: thread["id"],
+               type: "assistant_message",
+               role: "assistant",
+               content: "Old answer"
+             )
+
+    assert {:ok, _turn} = Avcs.Turns.complete_turn(project, first["turn"]["id"], "codex-1")
+    set_turn_time(project, first["turn"]["id"], 1)
+    set_item_time(project, first_assistant["id"], "2026-06-03T10:00:01.500Z")
+
+    assert {:ok, second} =
+             Avcs.Turns.create_user_turn(project, thread["id"], "Follow up", [])
+
+    assert {:ok, second_assistant} =
+             Avcs.Turns.append_item(project,
+               turn_id: second["turn"]["id"],
+               thread_id: thread["id"],
+               type: "assistant_message",
+               role: "assistant",
+               content: "Later answer"
+             )
+
+    assert {:ok, _turn} = Avcs.Turns.complete_turn(project, second["turn"]["id"], "codex-2")
+    set_turn_time(project, second["turn"]["id"], 2)
+
+    output_path = Path.join([project_dir, "output", "old-result.png"])
+    File.write!(output_path, @png)
+
+    assert {:ok, _asset} =
+             Avcs.Assets.upsert_asset(project, output_path,
+               source: "generated",
+               thread_id: thread["id"],
+               turn_id: second["turn"]["id"],
+               item_id: second_assistant["id"]
+             )
+
+    assert {:ok, [_board_item]} = Avcs.Board.list_items(project)
+
+    assert {:ok, edited} =
+             Avcs.Turns.edit_and_invalidate_after(
+               project,
+               first["item"]["id"],
+               "Revised prompt",
+               status: "queued"
+             )
+
+    assert edited["item"]["content"] == "Revised prompt"
+    assert edited["turn"]["status"] == "queued"
+    assert edited["turn"]["codex_turn_id"] == nil
+    assert edited["rollback_turn_count"] == 2
+    assert edited["invalidated_turn_ids"] == [second["turn"]["id"]]
+    assert first_assistant["id"] in edited["invalidated_item_ids"]
+    assert second["item"]["id"] in edited["invalidated_item_ids"]
+    assert second_assistant["id"] in edited["invalidated_item_ids"]
+
+    assert {:ok, [visible]} = Avcs.Turns.list_items(project, thread["id"])
+    assert visible["id"] == first["item"]["id"]
+    assert visible["content"] == "Revised prompt"
+    assert visible["turn_status"] == "queued"
+
+    assert {:ok, []} = Avcs.Board.list_items(project)
+    assert {:ok, [_asset]} = Avcs.Assets.list_assets(project)
+  end
+
+  test "editing rerun rejects steered and running user messages", %{project: project} do
+    assert {:ok, thread} = Avcs.Threads.create_thread(project, "Edit rerun rejected")
+
+    assert {:ok, running} =
+             Avcs.Turns.create_user_turn(project, thread["id"], "Still running", [])
+
+    assert {:error, :message_edit_conflict} =
+             Avcs.Turns.edit_and_invalidate_after(
+               project,
+               running["item"]["id"],
+               "Cannot edit yet"
+             )
+
+    assert {:ok, _turn} = Avcs.Turns.complete_turn(project, running["turn"]["id"], "codex-1")
+
+    assert {:ok, steered} =
+             Avcs.Turns.append_item(project,
+               turn_id: running["turn"]["id"],
+               thread_id: thread["id"],
+               type: "user_message",
+               role: "user",
+               content: "Steered",
+               payload: %{steered: true}
+             )
+
+    assert {:error, :message_edit_unsupported} =
+             Avcs.Turns.edit_and_invalidate_after(project, steered["id"], "No")
   end
 
   test "thread defaults and turn overrides persist model and sandbox settings", %{
@@ -535,6 +714,61 @@ defmodule Avcs.LocalFirstTest do
              end)
 
     timestamp
+  end
+
+  defp set_item_time(project, item_id, timestamp) do
+    assert {:ok, :ok} =
+             Avcs.Storage.SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+               Avcs.Storage.SQLite.run!(
+                 db,
+                 "UPDATE items SET created_at = ?, updated_at = ? WHERE id = ?",
+                 [timestamp, timestamp, item_id]
+               )
+
+               :ok
+             end)
+
+    timestamp
+  end
+
+  defp write_output_image(project_dir, file_name, salt) do
+    path = Path.join([project_dir, "output", file_name])
+    File.write!(path, @png <> :erlang.term_to_binary(salt))
+    path
+  end
+
+  defp upsert_generated(project, path, thread_id, created_turn) do
+    Avcs.Assets.upsert_asset(project, path,
+      source: "generated",
+      thread_id: thread_id,
+      turn_id: created_turn["turn"]["id"],
+      item_id: created_turn["item"]["id"]
+    )
+  end
+
+  defp board_item_for_asset(board_items, asset_id) do
+    Enum.find(board_items, &(&1["asset_id"] == asset_id))
+  end
+
+  defp invalidate_board_item(project, board_item_id) do
+    assert {:ok, :ok} =
+             Avcs.Storage.SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+               Avcs.Storage.SQLite.run!(
+                 db,
+                 """
+                 UPDATE board_items
+                 SET invalidated_at = ?,
+                     invalidated_by_item_id = ?,
+                     z_index = ?
+                 WHERE id = ?
+                 """,
+                 ["2026-06-03T10:30:00Z", Ecto.UUID.generate(), 99, board_item_id]
+               )
+
+               :ok
+             end)
+
+    :ok
   end
 
   defp downgrade_turns_table_without_data_provider(project) do

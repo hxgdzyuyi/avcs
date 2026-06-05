@@ -63,6 +63,26 @@ defmodule AvcsWeb.AvcsChannel do
     end
   end
 
+  def handle_in("project:rename", %{"id" => id, "name" => name}, socket) do
+    case Avcs.Projects.rename_project(id, name) do
+      {:ok, project} ->
+        reply_ok(project, socket)
+
+      {:error, :project_not_found} ->
+        reply_error("project_not_found", "Project was not found", socket)
+
+      {:error, :invalid_project_name} ->
+        reply_error("invalid_project_name", "Project name is invalid", socket)
+
+      {:error, reason} ->
+        reply_error("project_rename_failed", to_string(reason), socket)
+    end
+  end
+
+  def handle_in("project:rename", _payload, socket) do
+    reply_error("invalid_project_name", "Project name is invalid", socket)
+  end
+
   def handle_in("project:archive", %{"id" => id}, socket) do
     case Avcs.Projects.archive_project(id) do
       {:ok, archived_project} ->
@@ -366,6 +386,44 @@ defmodule AvcsWeb.AvcsChannel do
           reply_error(code, message, socket)
       end
     end)
+  end
+
+  def handle_in("message:edit_rerun", %{"item_id" => item_id, "content" => content}, socket) do
+    with_project(socket, fn project ->
+      runner = Application.get_env(:avcs, :agent_runner, Avcs.Agent.Runner)
+
+      case rerun_runner(runner, project, item_id, content) do
+        {:ok, result} ->
+          reply_ok(result, socket)
+
+        {:error, :item_not_found} ->
+          reply_error("item_not_found", "Message item was not found", socket)
+
+        {:error, :message_edit_unsupported} ->
+          reply_error(
+            "message_edit_unsupported",
+            "This message cannot be edited and rerun",
+            socket
+          )
+
+        {:error, :message_edit_conflict} ->
+          reply_error(
+            "message_edit_conflict",
+            "Stop or wait for the current Agent run before editing history",
+            socket
+          )
+
+        {:error, :empty_message} ->
+          reply_error("empty_message", "Message text is required", socket)
+
+        {:error, reason} ->
+          reply_error("message_edit_rerun_failed", to_string(reason), socket)
+      end
+    end)
+  end
+
+  def handle_in("message:edit_rerun", _payload, socket) do
+    reply_error("message_edit_rerun_failed", "Message edit payload is invalid", socket)
   end
 
   def handle_in("turn:stop", payload, socket) do
@@ -801,6 +859,14 @@ defmodule AvcsWeb.AvcsChannel do
       runner.stop(project, thread_id, turn_id)
     else
       {:error, :interrupt_unsupported}
+    end
+  end
+
+  defp rerun_runner(runner, project, item_id, content) do
+    if module_exports?(runner, :rerun_from_item, 3) do
+      runner.rerun_from_item(project, item_id, content)
+    else
+      {:error, :message_edit_unsupported}
     end
   end
 

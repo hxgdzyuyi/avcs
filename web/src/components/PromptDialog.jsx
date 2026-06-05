@@ -3,6 +3,8 @@ import { PencilLine, X } from "lucide-react";
 import IconButton from "./IconButton.jsx";
 import { useModalDialog } from "./useModalDialog.js";
 
+const defaultT = (key, _params = {}, fallback = key) => fallback;
+
 export default function PromptDialog({
   title,
   message,
@@ -13,6 +15,7 @@ export default function PromptDialog({
   cancelLabel = "Cancel",
   required = true,
   trimValue = true,
+  t = defaultT,
   onConfirm,
   onCancel,
 }) {
@@ -59,7 +62,7 @@ export default function PromptDialog({
             {message ? <p id={messageId}>{message}</p> : null}
           </div>
           <IconButton
-            label="Close prompt"
+            label={t("common.close")}
             className="ghost confirm-dialog-close"
             onClick={onCancel}
           >

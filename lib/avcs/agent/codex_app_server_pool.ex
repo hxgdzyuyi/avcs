@@ -4,7 +4,7 @@ defmodule Avcs.Agent.CodexAppServerPool do
   use GenServer
   require Logger
 
-  @default_max_concurrency 2
+  @default_max_concurrency 5
   @default_idle_shutdown_after_ms 30 * 60 * 1_000
   @default_idle_check_ms 10_000
   @call_timeout_ms 5_000
@@ -55,6 +55,26 @@ defmodule Avcs.Agent.CodexAppServerPool do
     GenServer.call(
       server_name(),
       {:read_thread, clean_string(codex_thread_id), opts},
+      timeout + @call_timeout_ms
+    )
+  end
+
+  def fork_thread(codex_thread_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, @call_timeout_ms)
+
+    GenServer.call(
+      server_name(),
+      {:fork_thread, clean_string(codex_thread_id), opts},
+      timeout + @call_timeout_ms
+    )
+  end
+
+  def rollback_thread(codex_thread_id, num_turns, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, @call_timeout_ms)
+
+    GenServer.call(
+      server_name(),
+      {:rollback_thread, clean_string(codex_thread_id), num_turns, opts},
       timeout + @call_timeout_ms
     )
   end
@@ -150,6 +170,31 @@ defmodule Avcs.Agent.CodexAppServerPool do
       kind: :read_thread,
       from: from,
       codex_thread_id: codex_thread_id,
+      opts: opts,
+      queued?: false
+    }
+
+    {:noreply, assign_or_enqueue(request, state)}
+  end
+
+  def handle_call({:fork_thread, codex_thread_id, opts}, from, state) do
+    request = %{
+      kind: :fork_thread,
+      from: from,
+      codex_thread_id: codex_thread_id,
+      opts: opts,
+      queued?: false
+    }
+
+    {:noreply, assign_or_enqueue(request, state)}
+  end
+
+  def handle_call({:rollback_thread, codex_thread_id, num_turns, opts}, from, state) do
+    request = %{
+      kind: :rollback_thread,
+      from: from,
+      codex_thread_id: codex_thread_id,
+      num_turns: num_turns,
       opts: opts,
       queued?: false
     }
@@ -269,6 +314,8 @@ defmodule Avcs.Agent.CodexAppServerPool do
 
   defp pool_busy_reason(%{kind: :list_models}), do: "Codex app-server workers are busy"
   defp pool_busy_reason(%{kind: :read_thread}), do: "Codex app-server workers are busy"
+  defp pool_busy_reason(%{kind: :fork_thread}), do: "Codex app-server workers are busy"
+  defp pool_busy_reason(%{kind: :rollback_thread}), do: "Codex app-server workers are busy"
   defp pool_busy_reason(_request), do: "Codex app-server workers are busy"
 
   defp dispatch_waiting(state) do
@@ -387,6 +434,17 @@ defmodule Avcs.Agent.CodexAppServerPool do
     state
   end
 
+  defp assign_request(worker, %{kind: kind} = request, state)
+       when kind in [:fork_thread, :rollback_thread] do
+    state =
+      state
+      |> maybe_put_codex_route(request.codex_thread_id, worker)
+      |> put_worker_active(worker, request)
+
+    start_request_task(worker, request, state)
+    state
+  end
+
   defp assign_request(worker, request, state) do
     state = put_worker_active(state, worker, request)
     start_request_task(worker, request, state)
@@ -428,6 +486,27 @@ defmodule Avcs.Agent.CodexAppServerPool do
 
   defp run_worker_request(worker_module, worker, %{kind: :read_thread} = request, _pool) do
     worker_module.read_thread_on(worker, request.codex_thread_id, request.opts)
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  catch
+    :exit, reason -> {:error, "Codex app-server worker exited: #{inspect(reason)}"}
+  end
+
+  defp run_worker_request(worker_module, worker, %{kind: :fork_thread} = request, _pool) do
+    worker_module.fork_thread_on(worker, request.codex_thread_id, request.opts)
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  catch
+    :exit, reason -> {:error, "Codex app-server worker exited: #{inspect(reason)}"}
+  end
+
+  defp run_worker_request(worker_module, worker, %{kind: :rollback_thread} = request, _pool) do
+    worker_module.rollback_thread_on(
+      worker,
+      request.codex_thread_id,
+      request.num_turns,
+      request.opts
+    )
   rescue
     exception -> {:error, Exception.message(exception)}
   catch
@@ -513,6 +592,12 @@ defmodule Avcs.Agent.CodexAppServerPool do
     else
       state
     end
+  end
+
+  defp bind_result_codex_thread(state, worker, %{kind: kind}, {:ok, %{"id" => codex_thread_id}})
+       when kind in [:fork_thread, :rollback_thread] and is_binary(codex_thread_id) and
+              codex_thread_id != "" do
+    put_codex_route(state, codex_thread_id, worker)
   end
 
   defp bind_result_codex_thread(state, _worker, _request, _result), do: state

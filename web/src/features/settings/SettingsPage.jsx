@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, RotateCcw, Save, Settings as SettingsIcon, X } from "lucide-react";
 import IconButton from "../../components/IconButton.jsx";
+import { SUPPORTED_LOCALES } from "../../i18n.js";
 
 const GROUPS = [
-  ["agent", "Agent"],
-  ["images", "Images"],
-  ["projects", "Projects"],
-  ["assets", "Assets"],
+  ["agent", "Agent", "settings.group.agent"],
+  ["images", "Images", "settings.group.images"],
+  ["projects", "Projects", "settings.group.projects"],
+  ["assets", "Assets", "settings.group.assets"],
+  ["ui", "UI", "settings.group.ui"],
 ];
 
 const SETTING_DEFS = [
@@ -14,15 +16,17 @@ const SETTING_DEFS = [
     key: "agent.default_model",
     group: "agent",
     label: "Model",
+    labelKey: "settings.setting.agent_default_model",
     type: "model",
   },
   {
     key: "agent.default_effort",
     group: "agent",
     label: "Reasoning effort",
+    labelKey: "settings.setting.agent_default_effort",
     type: "select",
     options: [
-      ["", "Codex config"],
+      ["", "Codex config", "settings.option.codex_config"],
       ["none", "none"],
       ["minimal", "minimal"],
       ["low", "low"],
@@ -35,32 +39,35 @@ const SETTING_DEFS = [
     key: "agent.default_approval_policy",
     group: "agent",
     label: "Approval policy",
+    labelKey: "settings.setting.agent_default_approval_policy",
     type: "select",
     options: [
-      ["never", "No approval"],
-      ["on-request", "On request"],
-      ["on-failure", "On failure"],
-      ["untrusted", "Untrusted"],
+      ["never", "No approval", "settings.option.no_approval"],
+      ["on-request", "On request", "settings.option.on_request"],
+      ["on-failure", "On failure", "settings.option.on_failure"],
+      ["untrusted", "Untrusted", "settings.option.untrusted"],
     ],
   },
   {
     key: "agent.default_sandbox_mode",
     group: "agent",
     label: "Sandbox mode",
+    labelKey: "settings.setting.agent_default_sandbox_mode",
     type: "select",
     options: [
-      ["workspace-write", "Workspace write"],
-      ["read-only", "Read only"],
-      ["danger-full-access", "Full access"],
+      ["workspace-write", "Workspace write", "settings.option.workspace_write"],
+      ["read-only", "Read only", "settings.option.read_only"],
+      ["danger-full-access", "Full access", "settings.option.full_access"],
     ],
   },
   {
     key: "image.default_ratio",
     group: "images",
     label: "Default ratio",
+    labelKey: "settings.setting.image_default_ratio",
     type: "select",
     options: [
-      ["auto", "Auto"],
+      ["auto", "Auto", "settings.option.auto"],
       ["1:1", "1:1"],
       ["4:3", "4:3"],
       ["3:4", "3:4"],
@@ -72,6 +79,7 @@ const SETTING_DEFS = [
     key: "image.default_count",
     group: "images",
     label: "Default count",
+    labelKey: "settings.setting.image_default_count",
     type: "select",
     options: [
       [1, "1"],
@@ -84,25 +92,41 @@ const SETTING_DEFS = [
     key: "image.transparent_background",
     group: "images",
     label: "Transparent background",
+    labelKey: "settings.setting.image_transparent_background",
     type: "checkbox",
   },
   {
     key: "projects.default_root",
     group: "projects",
     label: "Default project folder",
+    labelKey: "settings.setting.projects_default_root",
     type: "text",
   },
   {
     key: "projects.restore_last_opened",
     group: "projects",
     label: "Restore last opened project",
+    labelKey: "settings.setting.projects_restore_last_opened",
     type: "checkbox",
   },
   {
     key: "assets.scan_on_open",
     group: "assets",
     label: "Scan project images on open",
+    labelKey: "settings.setting.assets_scan_on_open",
     type: "checkbox",
+  },
+  {
+    key: "ui.locale",
+    group: "ui",
+    label: "Language",
+    labelKey: "settings.setting.ui_locale",
+    type: "select",
+    options: SUPPORTED_LOCALES.map((locale) => [
+      locale.value,
+      locale.label,
+      locale.labelKey,
+    ]),
   },
 ];
 
@@ -117,13 +141,17 @@ const DEFAULT_SETTINGS = {
   "projects.default_root": "~/Documents/Avcs",
   "projects.restore_last_opened": true,
   "assets.scan_on_open": false,
+  "ui.locale": "en",
 };
+
+const defaultT = (key, _params = {}, fallback = key) => fallback;
 
 export default function SettingsPage({
   settingsItems = [],
   settings = {},
   modelOptions = [],
   connectionState,
+  t = defaultT,
   onSave,
   onReset,
   onBack,
@@ -189,9 +217,9 @@ export default function SettingsPage({
   async function handleResetKey(key) {
     if (dirty) {
       const confirmed = await onConfirm({
-        title: "Discard changes?",
-        message: "Discard unsaved changes before resetting this setting?",
-        confirmLabel: "Discard",
+        title: t("settings.confirm.discard_title"),
+        message: t("settings.confirm.discard_message"),
+        confirmLabel: t("common.discard"),
         tone: "danger",
       });
       if (!confirmed) return;
@@ -212,9 +240,9 @@ export default function SettingsPage({
   async function handleBack() {
     if (dirty) {
       const confirmed = await onConfirm({
-        title: "Discard settings changes?",
-        message: "Discard unsaved settings changes?",
-        confirmLabel: "Discard",
+        title: t("settings.confirm.back_title"),
+        message: t("settings.confirm.back_message"),
+        confirmLabel: t("common.discard"),
         tone: "danger",
       });
       if (!confirmed) return;
@@ -227,23 +255,23 @@ export default function SettingsPage({
     <div className="settings-page">
       <header className="settings-header">
         <div className="settings-header-left">
-          <IconButton label="Back to workspace" onClick={handleBack}>
+          <IconButton label={t("settings.action.back")} onClick={handleBack}>
             <ArrowLeft size={17} />
           </IconButton>
           <div>
             <span className="eyebrow">Avcs</span>
-            <h1>Settings</h1>
+            <h1>{t("settings.title")}</h1>
           </div>
         </div>
         <div className="settings-header-status">
           <span className={`connection-dot ${connectionState}`} />
-          <span>{connectionState}</span>
+          <span>{t(`connection.${connectionState}`, {}, connectionState)}</span>
         </div>
       </header>
 
       <main className="settings-shell">
-        <nav className="settings-nav" aria-label="Settings groups">
-          {GROUPS.map(([key, label]) => (
+        <nav className="settings-nav" aria-label={t("settings.nav_aria")}>
+          {GROUPS.map(([key, label, labelKey]) => (
             <button
               className={activeGroup === key ? "active" : ""}
               type="button"
@@ -251,7 +279,7 @@ export default function SettingsPage({
               onClick={() => setActiveGroup(key)}
             >
               <SettingsIcon size={15} />
-              <span>{label}</span>
+              <span>{t(labelKey, {}, label)}</span>
             </button>
           ))}
         </nav>
@@ -260,8 +288,8 @@ export default function SettingsPage({
           <form className="settings-form" onSubmit={handleSave}>
             <div className="settings-group-header">
               <div>
-                <span className="eyebrow">Global</span>
-                <h2>{groupLabel(activeGroup)}</h2>
+                <span className="eyebrow">{t("common.global")}</span>
+                <h2>{groupLabel(activeGroup, t)}</h2>
               </div>
               <div className="settings-form-actions">
                 <button
@@ -271,7 +299,7 @@ export default function SettingsPage({
                   onClick={() => setDraft(confirmed)}
                 >
                   <X size={14} />
-                  <span>Cancel</span>
+                  <span>{t("settings.action.cancel")}</span>
                 </button>
                 <button
                   className="settings-action secondary"
@@ -280,7 +308,7 @@ export default function SettingsPage({
                   onClick={() => setDraft(confirmed)}
                 >
                   <RotateCcw size={14} />
-                  <span>Reset changed</span>
+                  <span>{t("settings.action.reset_changed")}</span>
                 </button>
                 <button
                   className="settings-action primary"
@@ -288,7 +316,7 @@ export default function SettingsPage({
                   disabled={!dirty || saving || connectionState !== "online"}
                 >
                   <Save size={14} />
-                  <span>{saving ? "Saving" : "Save"}</span>
+                  <span>{saving ? t("common.saving") : t("common.save")}</span>
                 </button>
               </div>
             </div>
@@ -297,16 +325,19 @@ export default function SettingsPage({
               {activeDefs.map((definition) => {
                 const item = itemsByKey.get(definition.key);
                 const changed = !sameValue(draft[definition.key], confirmed[definition.key]);
-                const stateLabel = changed ? "Modified" : item?.is_default ? "Default" : "Custom";
+                const stateKey = changed ? "modified" : item?.is_default ? "default" : "custom";
+                const stateLabel = t(`common.${stateKey}`);
 
                 return (
                   <div className="settings-row" key={definition.key}>
                     <div className="settings-row-meta">
-                      <label htmlFor={settingInputId(definition.key)}>{definition.label}</label>
-                      <span className={stateLabel.toLowerCase()}>{stateLabel}</span>
+                      <label htmlFor={settingInputId(definition.key)}>
+                        {definitionLabel(definition, t)}
+                      </label>
+                      <span className={stateKey}>{stateLabel}</span>
                     </div>
                     <div className="settings-row-control">
-                      {renderControl(definition, draft, patchDraft, modelSelectOptions)}
+                      {renderControl(definition, draft, patchDraft, modelSelectOptions, t)}
                     </div>
                     <button
                       className="settings-row-reset"
@@ -315,7 +346,11 @@ export default function SettingsPage({
                       onClick={() => handleResetKey(definition.key)}
                     >
                       <RotateCcw size={13} />
-                      <span>{resettingKey === definition.key ? "Resetting" : "Reset"}</span>
+                      <span>
+                        {resettingKey === definition.key
+                          ? t("common.resetting")
+                          : t("common.reset")}
+                      </span>
                     </button>
                   </div>
                 );
@@ -334,7 +369,7 @@ export default function SettingsPage({
   );
 }
 
-function renderControl(definition, draft, patchDraft, modelSelectOptions) {
+function renderControl(definition, draft, patchDraft, modelSelectOptions, t) {
   const value = draft[definition.key];
   const inputId = settingInputId(definition.key);
 
@@ -347,7 +382,7 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions) {
           checked={Boolean(value)}
           onChange={(event) => patchDraft(definition.key, event.target.checked)}
         />
-        <span>{Boolean(value) ? "On" : "Off"}</span>
+        <span>{Boolean(value) ? t("common.on") : t("common.off")}</span>
       </label>
     );
   }
@@ -360,7 +395,7 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions) {
           className="settings-input"
           list="settings-model-options"
           value={value || ""}
-          placeholder="Codex config"
+          placeholder={t("settings.option.codex_config")}
           autoComplete="off"
           onChange={(event) => patchDraft(definition.key, event.target.value)}
         />
@@ -401,7 +436,7 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions) {
     >
       {definition.options.map(([optionValue, optionLabel]) => (
         <option value={optionValue} key={`${definition.key}-${optionValue}`}>
-          {optionLabel}
+          {optionLabelFor(definition, optionValue, optionLabel, t)}
         </option>
       ))}
     </select>
@@ -464,8 +499,20 @@ function sameValue(first, second) {
   return JSON.stringify(first ?? null) === JSON.stringify(second ?? null);
 }
 
-function groupLabel(group) {
-  return GROUPS.find(([key]) => key === group)?.[1] || "Settings";
+function groupLabel(group, t) {
+  const entry = GROUPS.find(([key]) => key === group);
+  return entry ? t(entry[2], {}, entry[1]) : t("settings.title");
+}
+
+function definitionLabel(definition, t) {
+  return t(definition.labelKey, {}, definition.label);
+}
+
+function optionLabelFor(definition, optionValue, optionLabel, t) {
+  const option = definition.options.find(
+    ([candidateValue]) => candidateValue === optionValue,
+  );
+  return t(option?.[2], {}, optionLabel);
 }
 
 function settingInputId(key) {

@@ -25,6 +25,7 @@ import {
   uploadAsset,
   uploadMaskAsset,
 } from "./api.js";
+import { createTranslator, normalizeLocale } from "./i18n.js";
 
 const SUPPORTED_REFERENCE_IMAGE_TYPES = new Set([
   "image/png",
@@ -34,6 +35,14 @@ const SUPPORTED_REFERENCE_IMAGE_TYPES = new Set([
 ]);
 const MESSAGE_PAGE_LIMIT = 30;
 const THINKING_DOT_COUNT = 5;
+const BOARD_HISTORY_LIMIT = 50;
+const BOARD_HISTORY_FIELDS = [
+  "x",
+  "y",
+  "display_width",
+  "display_height",
+  "z_index",
+];
 const DEFAULT_SITE_SETTINGS = {
   "agent.default_model": "gpt-5.5",
   "agent.default_effort": "medium",
@@ -45,6 +54,7 @@ const DEFAULT_SITE_SETTINGS = {
   "projects.default_root": "~/Documents/Avcs",
   "projects.restore_last_opened": true,
   "assets.scan_on_open": false,
+  "ui.locale": "en",
 };
 
 export default function App() {
@@ -64,6 +74,7 @@ export default function App() {
   );
   const [assets, setAssets] = useState([]);
   const [boardItems, setBoardItems] = useState([]);
+  const [boardHistory, setBoardHistory] = useState(() => emptyBoardHistory());
   const [references, setReferences] = useState([]);
   const [pendingReferences, setPendingReferences] = useState([]);
   const [prompt, setPrompt] = useState("");
@@ -102,6 +113,9 @@ export default function App() {
   const projectSqliteInfoProjectIdRef = useRef(null);
   const showProjectDbInfoDialogRef = useRef(false);
   const itemsRef = useRef([]);
+  const boardItemsRef = useRef([]);
+  const boardItemsLoadedRef = useRef(false);
+  const boardHistoryRef = useRef(boardHistory);
   const messagePagingRef = useRef(messagePaging);
   const messagePageRequestsRef = useRef({});
   const messageRequestSeqRef = useRef(0);
@@ -113,6 +127,13 @@ export default function App() {
   const settingsBackPathRef = useRef(null);
   const confirmResolverRef = useRef(null);
   const promptResolverRef = useRef(null);
+  const locale = normalizeLocale(siteSettings["ui.locale"]);
+  const t = useMemo(() => createTranslator(locale), [locale]);
+  const tRef = useRef(t);
+
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
 
   const confirmAction = useCallback((options = {}) => {
     if (confirmResolverRef.current) {
@@ -122,15 +143,15 @@ export default function App() {
     return new Promise((resolve) => {
       confirmResolverRef.current = resolve;
       setConfirmRequest({
-        title: "Confirm action",
+        title: t("app.confirm_action"),
         message: "",
-        confirmLabel: "Confirm",
-        cancelLabel: "Cancel",
+        confirmLabel: t("common.confirm"),
+        cancelLabel: t("common.cancel"),
         tone: "default",
         ...options,
       });
     });
-  }, []);
+  }, [t]);
 
   const settleConfirm = useCallback((confirmed) => {
     const resolver = confirmResolverRef.current;
@@ -147,18 +168,18 @@ export default function App() {
     return new Promise((resolve) => {
       promptResolverRef.current = resolve;
       setPromptRequest({
-        title: "Enter value",
-        label: "Value",
+        title: t("app.enter_value"),
+        label: t("app.value"),
         message: "",
         initialValue: "",
-        confirmLabel: "Save",
-        cancelLabel: "Cancel",
+        confirmLabel: t("common.save"),
+        cancelLabel: t("common.cancel"),
         required: true,
         trimValue: true,
         ...options,
       });
     });
-  }, []);
+  }, [t]);
 
   const settlePrompt = useCallback((value) => {
     const resolver = promptResolverRef.current;
@@ -201,6 +222,10 @@ export default function App() {
   }, [items]);
 
   useEffect(() => {
+    boardItemsRef.current = boardItems;
+  }, [boardItems]);
+
+  useEffect(() => {
     messagePagingRef.current = messagePaging;
   }, [messagePaging]);
 
@@ -213,6 +238,40 @@ export default function App() {
       setAgentThinking({ step: 0, lastAt: null });
     }
   }, [runningTurns]);
+
+  function replaceBoardItems(nextItems, options = {}) {
+    const items = nextItems || [];
+    if (options.markLoaded !== false) boardItemsLoadedRef.current = true;
+    boardItemsRef.current = items;
+    setBoardItems(items);
+  }
+
+  function updateBoardItemsState(updater) {
+    const nextItems =
+      typeof updater === "function" ? updater(boardItemsRef.current) : updater;
+    replaceBoardItems(nextItems);
+    return nextItems;
+  }
+
+  function updateBoardHistory(updater) {
+    const next = updater(boardHistoryRef.current);
+    boardHistoryRef.current = next;
+    setBoardHistory(next);
+  }
+
+  function clearBoardHistory() {
+    updateBoardHistory(() => emptyBoardHistory());
+  }
+
+  function pushBoardHistoryEntry(entry) {
+    if (!entry) return;
+
+    updateBoardHistory((current) => ({
+      ...current,
+      undoStack: [...current.undoStack, entry].slice(-BOARD_HISTORY_LIMIT),
+      redoStack: [],
+    }));
+  }
 
   useEffect(() => {
     return () => {
@@ -330,7 +389,8 @@ export default function App() {
         [activeProject.id]: threadItems,
       }));
       setAssets(assetData.items || []);
-      setBoardItems(boardData.items || []);
+      replaceBoardItems(boardData.items || []);
+      clearBoardHistory();
       setSelectedBoardIds((current) =>
         current.filter((id) =>
           (boardData.items || []).some((item) => item.id === id),
@@ -828,20 +888,39 @@ export default function App() {
         setReferences((current) =>
           current.filter((id) => nextAssetIds.has(id)),
         );
-        setBoardItems((current) =>
+        updateBoardItemsState((current) =>
           current.filter((item) => nextAssetIds.has(item.asset_id)),
         );
       }
       if (event === "board:items") {
-        setBoardItems(payload.items || []);
-        setSelectedBoardIds((current) =>
-          current.filter((id) =>
-            (payload.items || []).some((item) => item.id === id),
-          ),
-        );
+        const nextBoardItems = payload.items || [];
+        const createdBoardItems = boardItemsLoadedRef.current
+          ? newBoardItems(boardItemsRef.current, nextBoardItems)
+          : [];
+
+        replaceBoardItems(nextBoardItems);
+        clearBoardHistory();
+
+        if (createdBoardItems.length > 0) {
+          const createdAssetIds = createdBoardItems.map((item) => item.asset_id).filter(Boolean);
+          setSelectedBoardIds(createdBoardItems.map((item) => item.id));
+          if (createdAssetIds.length > 0) {
+            setBoardFocusRequest({
+              assetIds: createdAssetIds,
+              mode: "fit_if_outside",
+              requestId: Date.now(),
+            });
+          }
+        } else {
+          setSelectedBoardIds((current) =>
+            current.filter((id) =>
+              nextBoardItems.some((item) => item.id === id),
+            ),
+          );
+        }
       }
       if (event === "board:item:updated") {
-        setBoardItems((current) =>
+        updateBoardItemsState((current) =>
           current.map((item) =>
             item.id === payload.item.id ? payload.item : item,
           ),
@@ -963,7 +1042,7 @@ export default function App() {
           const message =
             payload.details?.error_message ||
             payload.message ||
-            "数据库整理失败";
+            tRef.current("app.database_maintenance_failed");
           setNotice(`${code}: ${message}`);
         }
       }
@@ -971,7 +1050,7 @@ export default function App() {
         event === "error" &&
         belongsToCurrentThread(payload, currentThreadIdRef.current)
       ) {
-        setNotice(payload.message || "An error occurred");
+        setNotice(payload.message || tRef.current("app.error_occurred"));
       }
     });
 
@@ -1072,11 +1151,11 @@ export default function App() {
 
   async function handleCreateBlankProject() {
     const name = await promptAction({
-      title: "新建空白项目",
-      label: "项目名称",
+      title: t("app.new_blank_project"),
+      label: t("app.project_name"),
       initialValue: "Untitled Project",
-      confirmLabel: "创建",
-      cancelLabel: "取消",
+      confirmLabel: t("app.create"),
+      cancelLabel: t("common.cancel"),
     });
     if (!name) return;
 
@@ -1176,10 +1255,10 @@ export default function App() {
   async function handleArchiveProject(projectEntry) {
     if (!channel || !projectEntry?.id) return;
     const confirmed = await confirmAction({
-      title: "归档项目",
-      message: `归档项目“${projectEntry.name}”？项目文件夹不会被删除。`,
-      confirmLabel: "归档",
-      cancelLabel: "取消",
+      title: t("app.archive_project"),
+      message: t("app.archive_project_message", { name: projectEntry.name }),
+      confirmLabel: t("app.archive_project"),
+      cancelLabel: t("common.cancel"),
     });
     if (!confirmed) return;
     setNotice("");
@@ -1189,7 +1268,48 @@ export default function App() {
         id: projectEntry.id,
       });
       applyProjectRemoval(projectEntry.id, data.project);
-      setNotice("项目已归档");
+      setNotice(t("app.project_archived"));
+    } catch (error) {
+      setNotice(error.message);
+    }
+  }
+
+  async function handleRenameProject(projectEntry) {
+    if (!channel || !projectEntry?.id) return;
+
+    const name = await promptAction({
+      title: t("app.rename_project"),
+      label: t("app.project_name"),
+      initialValue: projectEntry.name || "",
+      confirmLabel: t("common.save"),
+      cancelLabel: t("common.cancel"),
+    });
+    if (!name || name === projectEntry.name) return;
+
+    setNotice("");
+
+    try {
+      const renamed = await channel.push("project:rename", {
+        id: projectEntry.id,
+        name,
+      });
+
+      setProjects((current) =>
+        current.map((entry) =>
+          entry.id === renamed.id ? { ...entry, ...renamed } : entry,
+        ),
+      );
+
+      setProject((current) =>
+        current?.id === renamed.id
+          ? {
+              ...current,
+              ...renamed,
+              current_thread_id: current.current_thread_id,
+            }
+          : current,
+      );
+      setNotice(t("app.project_renamed"));
     } catch (error) {
       setNotice(error.message);
     }
@@ -1198,10 +1318,10 @@ export default function App() {
   async function handleArchiveProjectThreads(projectEntry) {
     if (!channel || !projectEntry?.id) return;
     const confirmed = await confirmAction({
-      title: "归档项目对话",
-      message: `归档项目“${projectEntry.name}”下的所有对话？项目本身不会被归档。`,
-      confirmLabel: "归档对话",
-      cancelLabel: "取消",
+      title: t("app.archive_threads"),
+      message: t("app.archive_threads_message", { name: projectEntry.name }),
+      confirmLabel: t("app.archive_threads"),
+      cancelLabel: t("common.cancel"),
     });
     if (!confirmed) return;
     setNotice("");
@@ -1227,8 +1347,8 @@ export default function App() {
 
       setNotice(
         archivedCount > 0
-          ? `已归档 ${archivedCount} 个对话`
-          : "没有可归档的对话",
+          ? t("app.threads_archived", { count: archivedCount })
+          : t("app.no_threads_to_archive"),
       );
     } catch (error) {
       setNotice(error.message);
@@ -1238,10 +1358,12 @@ export default function App() {
   async function handleDeleteProject(projectEntry) {
     if (!channel || !projectEntry?.id) return;
     const confirmed = await confirmAction({
-      title: "删除项目引用",
-      message: `从项目列表删除“${projectEntry.name}”？这只会删除 SQLite 中的项目引用，不会删除文件夹。`,
-      confirmLabel: "删除引用",
-      cancelLabel: "取消",
+      title: t("app.delete_project_reference"),
+      message: t("app.delete_project_reference_message", {
+        name: projectEntry.name,
+      }),
+      confirmLabel: t("app.delete_project_reference"),
+      cancelLabel: t("common.cancel"),
       tone: "danger",
     });
     if (!confirmed) return;
@@ -1252,7 +1374,7 @@ export default function App() {
         id: projectEntry.id,
       });
       applyProjectRemoval(projectEntry.id, data.project);
-      setNotice("项目引用已删除");
+      setNotice(t("app.project_reference_deleted"));
     } catch (error) {
       setNotice(error.message);
     }
@@ -1360,7 +1482,9 @@ export default function App() {
     setDraftProjectId(null);
     resetMessageWindow(null);
     setAssets([]);
-    setBoardItems([]);
+    boardItemsLoadedRef.current = false;
+    replaceBoardItems([], { markLoaded: false });
+    clearBoardHistory();
     setReferences([]);
     setSelectedDataProvider(null);
     setPrompt("");
@@ -1506,11 +1630,11 @@ export default function App() {
   async function handleRenameThread(thread) {
     if (!channel) return;
     const title = await promptAction({
-      title: "重命名对话",
-      label: "Thread title",
+      title: t("app.rename_thread"),
+      label: t("app.thread_title"),
       initialValue: thread.title || "",
-      confirmLabel: "保存",
-      cancelLabel: "取消",
+      confirmLabel: t("common.save"),
+      cancelLabel: t("common.cancel"),
     });
     if (!title || title === thread.title) return;
     await channel.push("thread:rename", { id: thread.id, title });
@@ -1520,10 +1644,10 @@ export default function App() {
   async function handleDeleteThread(id) {
     if (!channel) return;
     const confirmed = await confirmAction({
-      title: "归档对话",
-      message: "归档当前对话？",
-      confirmLabel: "归档",
-      cancelLabel: "取消",
+      title: t("app.archive_thread"),
+      message: t("app.archive_thread_message"),
+      confirmLabel: t("app.archive_thread"),
+      cancelLabel: t("common.cancel"),
     });
     if (!confirmed) return;
     const data = await channel.push("thread:delete", { id });
@@ -1625,7 +1749,7 @@ export default function App() {
     if (!text && references.length === 0) return;
     const messageText = appendImageSettingsToPrompt(text, imageSettings);
     if (hasUploadingReferences(pendingReferences)) {
-      setNotice("Wait for pasted images to finish uploading before sending.");
+      setNotice(t("app.wait_uploading"));
       return;
     }
     setNotice("");
@@ -1658,12 +1782,12 @@ export default function App() {
   }
 
   async function handleSendImagePrompt(assetId, text, maskFile = null) {
-    if (!channel || !project) throw new Error("Open a project folder first.");
+    if (!channel || !project) throw new Error(t("app.open_project_first"));
 
     const messageText = String(text || "").trim();
     if (!assetId || !messageText) return null;
     if (!assets.some((asset) => asset.id === assetId)) {
-      throw new Error("Image is no longer available.");
+      throw new Error(t("app.image_unavailable"));
     }
 
     setNotice("");
@@ -1767,17 +1891,47 @@ export default function App() {
     }
   }
 
+  function messageHasFollowingContent(item) {
+    if (!item?.id) return false;
+
+    const visibleItems = itemsRef.current || [];
+    const index = visibleItems.findIndex((candidate) => candidate.id === item.id);
+
+    if (index < 0) return true;
+    return index < visibleItems.length - 1 || messagePagingRef.current.hasMoreAfter;
+  }
+
   async function handleUpdateItem(item, content) {
-    if (!channel || !item?.id) return;
+    if (!channel || !item?.id) return false;
     setNotice("");
 
     try {
-      const data = await channel.push("item:update", {
-        id: item.id,
-        content,
-      });
+      const isUserMessage = item.type === "user_message" || item.role === "user";
+
+      if (isUserMessage && messageHasFollowingContent(item)) {
+        const confirmed = await confirmAction({
+          title: t("chat.edit_rerun_title"),
+          message: t("chat.edit_rerun_message"),
+          confirmLabel: t("chat.save_and_rerun"),
+          tone: "danger",
+        });
+
+        if (!confirmed) return false;
+      }
+
+      const data = isUserMessage
+        ? await channel.push("message:edit_rerun", {
+            item_id: item.id,
+            content,
+          })
+        : await channel.push("item:update", {
+            id: item.id,
+            content,
+          });
 
       if (data.item) mergeUpdatedMessageItem(data.item);
+      if (data.turn) markTurnStatus(data.turn.id, data.turn.status);
+      return true;
     } catch (error) {
       setNotice(error.message);
       throw error;
@@ -1831,7 +1985,8 @@ export default function App() {
           [project.id]: nextThreads,
         }));
       setAssets(nextAssets);
-      setBoardItems(nextBoardItems);
+      replaceBoardItems(nextBoardItems);
+      clearBoardHistory();
       setSelectedBoardIds((current) =>
         current.filter((id) => nextBoardItems.some((item) => item.id === id)),
       );
@@ -1847,7 +2002,10 @@ export default function App() {
 
       const repair = data.repair || {};
       setNotice(
-        `Thread repaired: ${repair.matched_turns || 0} turns, ${repair.synced_items || 0} items synced.`,
+        t("app.thread_repaired", {
+          turns: repair.matched_turns || 0,
+          items: repair.synced_items || 0,
+        }),
       );
     } catch (error) {
       setNotice(error.message);
@@ -1885,7 +2043,7 @@ export default function App() {
     if (!files?.length) return;
 
     if (!project) {
-      setNotice("Open a project folder first.");
+      setNotice(t("app.open_project_first"));
       return;
     }
 
@@ -1898,12 +2056,12 @@ export default function App() {
     if (!file) return false;
 
     if (!project) {
-      setNotice("Open a project folder first.");
+      setNotice(t("app.open_project_first"));
       return false;
     }
 
     if (!isSupportedReferenceImage(file)) {
-      setNotice("Unsupported image format. Use PNG, JPEG, GIF, or WebP.");
+      setNotice(t("app.unsupported_image"));
       return false;
     }
 
@@ -1939,7 +2097,8 @@ export default function App() {
       channel.push("board:items:list"),
     ]);
     setAssets(assetData.items || []);
-    setBoardItems(boardData.items || []);
+    replaceBoardItems(boardData.items || []);
+    clearBoardHistory();
     setSelectedBoardIds((current) =>
       current.filter((id) =>
         (boardData.items || []).some((item) => item.id === id),
@@ -2022,11 +2181,25 @@ export default function App() {
     }
 
     addReference(assetId);
-    setNotice("Image added as a reference.");
+    setNotice(t("app.image_added_reference"));
   }
 
   async function handleResize(id, displayWidth, displayHeight, commit) {
-    setBoardItems((current) =>
+    if (commit) {
+      return handleUpdateBoardItems(
+        [
+          {
+            id,
+            display_width: displayWidth,
+            display_height: displayHeight,
+          },
+        ],
+        true,
+        { historyLabel: "Resize" },
+      );
+    }
+
+    updateBoardItemsState((current) =>
       current.map((item) =>
         item.id === id
           ? {
@@ -2037,49 +2210,111 @@ export default function App() {
           : item,
       ),
     );
-    if (commit && channel) {
-      try {
-        await channel.push("board:item:resize", {
-          id,
-          display_width: displayWidth,
-          display_height: displayHeight,
-        });
-      } catch (error) {
-        setNotice(error.message);
-        await refreshAssetsAndBoard();
+
+    return { ok: true };
+  }
+
+  async function handleUpdateBoardItems(updates, commit, options = {}) {
+    const itemUpdates = Array.isArray(updates) ? updates.filter(Boolean) : [];
+    if (!itemUpdates.length) return { ok: false };
+
+    const beforeSnapshots =
+      commit && channel && !options.skipHistory
+        ? boardHistorySnapshotsForUpdates(
+            boardItemsRef.current,
+            itemUpdates,
+            options.beforeSnapshot,
+          )
+        : [];
+
+    replaceBoardItems(mergeBoardItemUpdates(boardItemsRef.current, itemUpdates));
+
+    if (!commit) return { ok: true, items: boardItemsRef.current };
+    if (!channel) return { ok: false };
+
+    try {
+      const data = await channel.push("board:items:update", {
+        items: itemUpdates,
+      });
+
+      if (data.items?.length) {
+        replaceBoardItems(
+          mergeBoardItemReplacements(boardItemsRef.current, data.items),
+        );
       }
+
+      if (!options.skipHistory && beforeSnapshots.length > 0) {
+        const afterSnapshots = boardHistorySnapshotsForIds(
+          boardItemsRef.current,
+          beforeSnapshots.map((snapshot) => snapshot.id),
+        );
+        pushBoardHistoryEntry(
+          createBoardHistoryEntry(
+            options.historyLabel || "Board update",
+            beforeSnapshots,
+            afterSnapshots,
+          ),
+        );
+      }
+
+      options.afterSuccess?.(data);
+      return { ok: true, data, items: boardItemsRef.current };
+    } catch (error) {
+      setNotice(error.message);
+      await refreshAssetsAndBoard();
+      return { ok: false, error };
     }
   }
 
-  async function handleUpdateBoardItems(updates, commit) {
-    if (!updates?.length) return;
+  async function handleUndoBoardHistory() {
+    await performBoardHistoryAction("undo");
+  }
 
-    setBoardItems((current) =>
-      current.map((item) => {
-        const update = updates.find((candidate) => candidate.id === item.id);
-        return update ? { ...item, ...update } : item;
-      }),
-    );
+  async function handleRedoBoardHistory() {
+    await performBoardHistoryAction("redo");
+  }
 
-    if (commit && channel) {
-      try {
-        const data = await channel.push("board:items:update", {
-          items: updates,
-        });
-        if (data.items?.length) {
-          setBoardItems((current) =>
-            current.map((item) => {
-              const updated = data.items.find(
-                (candidate) => candidate.id === item.id,
-              );
-              return updated || item;
-            }),
+  async function performBoardHistoryAction(direction) {
+    if (boardHistoryRef.current.busy) return;
+
+    updateBoardHistory((current) => ({ ...current, busy: true }));
+
+    try {
+      while (true) {
+        const history = boardHistoryRef.current;
+        const sourceStack =
+          direction === "undo" ? history.undoStack : history.redoStack;
+        const entry = sourceStack[sourceStack.length - 1];
+        if (!entry) return;
+
+        const targetSnapshots =
+          direction === "undo" ? entry.before : entry.after;
+        const target = boardHistoryTargetUpdates(
+          boardItemsRef.current,
+          targetSnapshots,
+        );
+
+        if (target.existingCount === 0) {
+          updateBoardHistory((current) =>
+            removeBoardHistoryEntry(current, direction, entry.id),
           );
+          continue;
         }
-      } catch (error) {
-        setNotice(error.message);
-        await refreshAssetsAndBoard();
+
+        if (target.updates.length > 0) {
+          const result = await handleUpdateBoardItems(target.updates, true, {
+            skipHistory: true,
+          });
+          if (!result.ok) return;
+        }
+
+        updateBoardHistory((current) =>
+          moveBoardHistoryEntry(current, direction, entry),
+        );
+        return;
       }
+    } finally {
+      updateBoardHistory((current) => ({ ...current, busy: false }));
     }
   }
 
@@ -2095,7 +2330,7 @@ export default function App() {
     try {
       const data = await readAssetPath(assetId);
       await navigator.clipboard.writeText(data.path);
-      setNotice("Path copied");
+      setNotice(t("app.path_copied"));
     } catch (error) {
       setNotice(error.message);
     }
@@ -2103,18 +2338,18 @@ export default function App() {
 
   async function handleDeleteSelectedBoardItem({ item, selectedCount } = {}) {
     if (selectedCount !== 1 || !item) {
-      setNotice("一次只能删除一个文件");
+      setNotice(t("app.delete_one_file_only"));
       return;
     }
 
     const asset = assets.find((candidate) => candidate.id === item.asset_id);
-    const fileName = asset?.file_name || item.file_name || "selected image";
+    const fileName = asset?.file_name || item.file_name || t("common.image");
 
     const confirmed = await confirmAction({
-      title: "删除图片",
-      message: `删除图片“${fileName}”？这会通过 rm 删除单个文件，操作不可撤销。`,
-      confirmLabel: "删除",
-      cancelLabel: "取消",
+      title: t("app.delete_image"),
+      message: t("app.delete_image_message", { name: fileName }),
+      confirmLabel: t("app.delete_image"),
+      cancelLabel: t("common.cancel"),
       tone: "danger",
     });
     if (!confirmed) return;
@@ -2125,7 +2360,7 @@ export default function App() {
       await deleteAsset(item.asset_id);
       setReferences((current) => current.filter((id) => id !== item.asset_id));
       setSelectedBoardIds((current) => current.filter((id) => id !== item.id));
-      setBoardItems((current) =>
+      updateBoardItemsState((current) =>
         current.filter(
           (candidate) =>
             candidate.id !== item.id && candidate.asset_id !== item.asset_id,
@@ -2135,7 +2370,7 @@ export default function App() {
         current.filter((candidate) => candidate.id !== item.asset_id),
       );
       await refreshAssetsAndBoard();
-      setNotice("图片已删除");
+      setNotice(t("app.image_deleted"));
     } catch (error) {
       setNotice(error.message);
     }
@@ -2246,9 +2481,12 @@ export default function App() {
   const streamingText = activeRun
     ? streamingByTurn[activeRun.turn_id]?.text || ""
     : "";
+  const nextUndoEntry = boardHistory.undoStack[boardHistory.undoStack.length - 1];
+  const nextRedoEntry = boardHistory.redoStack[boardHistory.redoStack.length - 1];
   const confirmDialog = confirmRequest ? (
     <ConfirmDialog
       {...confirmRequest}
+      t={t}
       onCancel={() => settleConfirm(false)}
       onConfirm={() => settleConfirm(true)}
     />
@@ -2256,6 +2494,7 @@ export default function App() {
   const promptDialog = promptRequest ? (
     <PromptDialog
       {...promptRequest}
+      t={t}
       onCancel={() => settlePrompt(null)}
       onConfirm={(value) => settlePrompt(value)}
     />
@@ -2286,6 +2525,7 @@ export default function App() {
           settings={siteSettings}
           modelOptions={modelOptions}
           connectionState={connectionState}
+          t={t}
           onSave={handleSaveSiteSettings}
           onReset={handleResetSiteSettings}
           onBack={handleCloseSettings}
@@ -2299,19 +2539,19 @@ export default function App() {
 
   return (
     <>
-      <nav className="mobile-tabs" aria-label="Workspace views">
+      <nav className="mobile-tabs" aria-label={t("app.workspace_views", {}, "Workspace views")}>
         {[
-          ["project", "Project"],
-          ["thread", "Thread"],
-          ["board", "Board"],
-        ].map(([value, label]) => (
+          ["project", "common.project"],
+          ["thread", "common.thread"],
+          ["board", "common.board"],
+        ].map(([value, labelKey]) => (
           <button
             className={mobileView === value ? "active" : ""}
             type="button"
             key={value}
             onClick={() => setMobileView(value)}
           >
-            {label}
+            {t(labelKey)}
           </button>
         ))}
       </nav>
@@ -2337,6 +2577,7 @@ export default function App() {
           onToggleShowAllThreads={handleToggleShowAllThreads}
           onCreateThread={handlePrepareNewThread}
           onSelectThread={handleSelectThread}
+          onRenameProject={handleRenameProject}
           onRenameThread={handleRenameThread}
           onDeleteThread={handleDeleteThread}
           onArchiveProject={handleArchiveProject}
@@ -2350,6 +2591,7 @@ export default function App() {
           agentRunning={anyAgentRunning}
           agentThinkingStep={agentThinking.step}
           runningThreadIds={runningThreadIds}
+          t={t}
         />
 
         <section
@@ -2406,6 +2648,7 @@ export default function App() {
               onReturnToLatest={handleReturnToLatestItems}
               onLoadAroundTurn={handleLoadAroundTurn}
               onBottomStateChange={handleMessageBottomChange}
+              t={t}
             />
 
             <BoardPane
@@ -2427,6 +2670,15 @@ export default function App() {
               onToggleLeftAndMiddle={() =>
                 setCollapsedLeftAndMiddle((value) => !value)
               }
+              canUndo={boardHistory.undoStack.length > 0}
+              canRedo={boardHistory.redoStack.length > 0}
+              undoLabel={nextUndoEntry?.label}
+              redoLabel={nextRedoEntry?.label}
+              historyBusy={boardHistory.busy}
+              onUndo={handleUndoBoardHistory}
+              onRedo={handleRedoBoardHistory}
+              onConfirm={confirmAction}
+              t={t}
             />
           </div>
         </section>
@@ -2435,7 +2687,7 @@ export default function App() {
           <div className="notice" role="status">
             <span>{notice}</span>
             <button type="button" onClick={() => setNotice("")}>
-              Dismiss
+              {t("app.dismiss")}
             </button>
           </div>
         ) : null}
@@ -2453,7 +2705,10 @@ export default function App() {
         />
       ) : null}
       {showShortcutGuideDialog ? (
-        <ShortcutGuideDialog onClose={() => setShowShortcutGuideDialog(false)} />
+        <ShortcutGuideDialog
+          onClose={() => setShowShortcutGuideDialog(false)}
+          t={t}
+        />
       ) : null}
       {confirmDialog}
       {promptDialog}
@@ -2468,6 +2723,13 @@ function mergeById(items) {
     seen.add(item.id);
     return true;
   });
+}
+
+function newBoardItems(previousItems, nextItems) {
+  const previousIds = new Set(
+    (previousItems || []).map((item) => item.id).filter(Boolean),
+  );
+  return (nextItems || []).filter((item) => item?.id && !previousIds.has(item.id));
 }
 
 function reorderByIdList(items, orderedIds) {
@@ -2658,6 +2920,158 @@ function revokePendingReferencePreviews(previews) {
   previews.clear();
 }
 
+function emptyBoardHistory() {
+  return {
+    undoStack: [],
+    redoStack: [],
+    busy: false,
+  };
+}
+
+function mergeBoardItemUpdates(items, updates) {
+  const updateById = new Map(updates.map((update) => [update.id, update]));
+
+  return items.map((item) => ({
+    ...item,
+    ...(updateById.get(item.id) || {}),
+  }));
+}
+
+function mergeBoardItemReplacements(items, updatedItems) {
+  const updatedById = new Map(updatedItems.map((item) => [item.id, item]));
+
+  return items.map((item) => updatedById.get(item.id) || item);
+}
+
+function boardHistorySnapshotsForUpdates(items, updates, beforeSnapshot = []) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  const beforeById = new Map(
+    (beforeSnapshot || []).map((snapshot) => [snapshot.id, snapshot]),
+  );
+
+  return updates
+    .map((update) => {
+      const currentItem = itemById.get(update.id);
+      if (!currentItem) return null;
+
+      return boardItemHistorySnapshot(
+        beforeById.get(update.id) || {},
+        currentItem,
+      );
+    })
+    .filter(Boolean);
+}
+
+function boardHistorySnapshotsForIds(items, ids) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+
+  return ids
+    .map((id) => {
+      const item = itemById.get(id);
+      return item ? boardItemHistorySnapshot(item) : null;
+    })
+    .filter(Boolean);
+}
+
+function createBoardHistoryEntry(label, beforeSnapshots, afterSnapshots) {
+  const afterById = new Map(afterSnapshots.map((snapshot) => [snapshot.id, snapshot]));
+  const before = [];
+  const after = [];
+
+  beforeSnapshots.forEach((beforeSnapshot) => {
+    const afterSnapshot = afterById.get(beforeSnapshot.id);
+    if (!afterSnapshot || boardHistorySnapshotsEqual(beforeSnapshot, afterSnapshot)) {
+      return;
+    }
+
+    before.push(beforeSnapshot);
+    after.push(afterSnapshot);
+  });
+
+  if (before.length === 0) return null;
+
+  return {
+    id: `board-history-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    label,
+    before,
+    after,
+  };
+}
+
+function boardHistoryTargetUpdates(items, snapshots) {
+  const itemById = new Map(items.map((item) => [item.id, item]));
+  let existingCount = 0;
+
+  const updates = snapshots.filter((snapshot) => {
+    const item = itemById.get(snapshot.id);
+    if (!item) return false;
+    existingCount += 1;
+    return !boardHistorySnapshotsEqual(boardItemHistorySnapshot(item), snapshot);
+  });
+
+  return { existingCount, updates };
+}
+
+function removeBoardHistoryEntry(history, direction, entryId) {
+  const sourceKey = direction === "undo" ? "undoStack" : "redoStack";
+
+  return {
+    ...history,
+    [sourceKey]: history[sourceKey].filter((entry) => entry.id !== entryId),
+  };
+}
+
+function moveBoardHistoryEntry(history, direction, entry) {
+  const sourceKey = direction === "undo" ? "undoStack" : "redoStack";
+  const targetKey = direction === "undo" ? "redoStack" : "undoStack";
+
+  return {
+    ...history,
+    [sourceKey]: history[sourceKey].filter((candidate) => candidate.id !== entry.id),
+    [targetKey]: [...history[targetKey], entry].slice(-BOARD_HISTORY_LIMIT),
+  };
+}
+
+function boardItemHistorySnapshot(item, fallback = {}) {
+  return {
+    id: historyFieldValue(item, fallback, "id"),
+    x: historyNumber(historyFieldValue(item, fallback, "x")),
+    y: historyNumber(historyFieldValue(item, fallback, "y")),
+    display_width: historyNumber(
+      historyFieldValue(item, fallback, "display_width"),
+    ),
+    display_height: historyNumber(
+      historyFieldValue(item, fallback, "display_height"),
+    ),
+    z_index: historyPositiveInteger(
+      historyFieldValue(item, fallback, "z_index"),
+    ),
+  };
+}
+
+function boardHistorySnapshotsEqual(left, right) {
+  return BOARD_HISTORY_FIELDS.every((field) => left[field] === right[field]);
+}
+
+function historyFieldValue(item, fallback, field) {
+  if (item && Object.prototype.hasOwnProperty.call(item, field)) {
+    return item[field];
+  }
+
+  return fallback?.[field];
+}
+
+function historyNumber(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round((number + Number.EPSILON) * 1000) / 1000;
+}
+
+function historyPositiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : 1;
+}
+
 function defaultComposerSettings(siteSettings = DEFAULT_SITE_SETTINGS) {
   const settings = normalizeSiteSettings(siteSettings);
 
@@ -2744,8 +3158,13 @@ function dataProviderPayload(provider) {
 }
 
 function normalizeSiteSettings(settings = {}) {
-  return {
+  const merged = {
     ...DEFAULT_SITE_SETTINGS,
     ...(settings || {}),
+  };
+
+  return {
+    ...merged,
+    "ui.locale": normalizeLocale(merged["ui.locale"]),
   };
 }

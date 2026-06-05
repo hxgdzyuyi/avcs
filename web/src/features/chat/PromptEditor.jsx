@@ -8,13 +8,21 @@ import {
 import { Compartment, EditorState, Prec } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 
-export default function PromptEditor({ value, onChange, onSubmit, onPasteImages, disabled }) {
+export default function PromptEditor({
+  value,
+  onChange,
+  onSubmit,
+  onPasteImages,
+  disabled,
+  placeholderText = "Describe the image you want to create...",
+}) {
   const hostRef = useRef(null);
   const viewRef = useRef(null);
   const submitRef = useRef(onSubmit);
   const changeRef = useRef(onChange);
   const pasteImagesRef = useRef(onPasteImages);
   const editableRef = useRef(new Compartment());
+  const placeholderRef = useRef(new Compartment());
 
   useEffect(() => {
     submitRef.current = onSubmit;
@@ -31,7 +39,7 @@ export default function PromptEditor({ value, onChange, onSubmit, onPasteImages,
         doc: value,
         extensions: [
           history(),
-          placeholder("Describe the image you want to create..."),
+          placeholderRef.current.of(placeholder(placeholderText)),
           EditorView.lineWrapping,
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {
@@ -102,6 +110,15 @@ export default function PromptEditor({ value, onChange, onSubmit, onPasteImages,
       effects: editableRef.current.reconfigure(EditorView.editable.of(!disabled)),
     });
   }, [disabled]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+
+    view.dispatch({
+      effects: placeholderRef.current.reconfigure(placeholder(placeholderText)),
+    });
+  }, [placeholderText]);
 
   return <div className="prompt-editor" ref={hostRef} data-disabled={disabled ? "true" : "false"} />;
 }

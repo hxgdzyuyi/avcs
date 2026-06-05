@@ -1,6 +1,6 @@
 ---
 git_commit_message: 'board: plan undo redo history'
-plan_state: rendered
+plan_state: finished
 ---
 # 004 画板对象操作 Undo / Redo
 
@@ -44,9 +44,11 @@ plan_state: rendered
 
 1. 只有 `commit=true` 且产生实际差异时入栈。
 2. 拖拽、resize 的 pointer move 中间帧不入栈，pointer up 只入一条。
-3. 多选移动、布局菜单、层级菜单、快捷键层级调整和真实比例重排各入一条。
-4. 保存失败时不保留该 history entry，并沿用当前重新拉取 board items 的恢复策略。
-5. 切换项目、重新加载项目或收到全量 `board:items` 同步时清空历史栈，避免旧快照覆盖新状态。
+3. 拖拽和 resize 的 `before` 快照由交互发起方在 pointer down 时记录，并在最终 `commit=true` 时通过 `options.beforeSnapshot` 传给保存入口，避免被中间乐观更新污染。
+4. 多选移动、布局菜单、层级菜单、快捷键层级调整和真实比例重排各入一条。
+5. 保存成功后的 `after` 快照优先使用服务端返回并合并后的 item，避免后端字段规范化后 redo 与数据库不一致。
+6. 保存失败时不保留该 history entry，并沿用当前重新拉取 board items 的恢复策略。
+7. 切换项目、重新加载项目或收到全量 `board:items` 同步时清空历史栈，避免旧快照覆盖新状态。
 
 ## api
 
@@ -91,15 +93,18 @@ plan_state: rendered
 实现建议：
 
 1. 在 `App.jsx` 或独立 `web/src/features/board/boardHistory.js` 中集中实现：
-   - `createBoardHistoryEntry(items, updates, label)`
+   - `createBoardHistoryEntry(items, updates, label, beforeSnapshot)`
    - `applyBoardHistorySnapshot(snapshot)`
    - `pushUndoEntry(entry)`
    - `performUndo()` / `performRedo()`
-2. 将 `handleUpdateBoardItems(updates, commit, options)` 扩展为可传 `historyLabel`、`skipHistory`、`afterSuccess`。
+2. 将 `handleUpdateBoardItems(updates, commit, options)` 扩展为可传 `historyLabel`、`beforeSnapshot`、`skipHistory`、`afterSuccess`。
 3. `BoardPane` 中各提交点传入明确 label：移动、resize、align、normalize、tidy、arrange、layer。
-4. 将单对象 resize 的提交改用统一批量更新 helper；保留 `handleResize(..., false)` 只服务拖拽中间帧。
-5. 用 `shouldIgnoreGlobalShortcut()` 复用现有快捷键过滤，避免和 composer / modal 冲突。
-6. 如没有前端测试框架，不为本计划单独引入；优先把纯函数写成可测试形式，后续测试体系补测。
+4. `startObjectDrag` 和 `startResize` 在 pointer down 时记录完整 `beforeSnapshot`，最终 pointer up 调用 `onUpdateItems(updates, true, { historyLabel, beforeSnapshot })`。
+5. `beforeSnapshot` 字段保持完整：`id`、`x`、`y`、`display_width`、`display_height`、`z_index`；本次未修改的字段也保留，保证 undo entry 结构统一。
+6. 对 align、tidy、arrange、layer 等没有中间帧的同步操作，可由 `App.jsx` 在提交前基于当前 `boardItems` 构建 `before`。
+7. 将单对象 resize 的提交改用统一批量更新 helper；保留 `handleResize(..., false)` 只服务拖拽中间帧。
+8. 用 `shouldIgnoreGlobalShortcut()` 复用现有快捷键过滤，避免和 composer / modal 冲突。
+9. 如没有前端测试框架，不为本计划单独引入；优先把纯函数写成可测试形式，后续测试体系补测。
 
 验证建议：
 

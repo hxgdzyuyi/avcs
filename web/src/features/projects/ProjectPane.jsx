@@ -18,6 +18,7 @@ import IconButton from "../../components/IconButton.jsx";
 
 const DEFAULT_THREAD_LIMIT = 6;
 const THINKING_DOT_COUNT = 5;
+const defaultT = (key, _params = {}, fallback = key) => fallback;
 
 export default function ProjectPane({
   project,
@@ -36,6 +37,7 @@ export default function ProjectPane({
   onToggleShowAllThreads,
   onCreateThread,
   onSelectThread,
+  onRenameProject,
   onRenameThread,
   onDeleteThread,
   onArchiveProject,
@@ -49,6 +51,7 @@ export default function ProjectPane({
   agentRunning,
   agentThinkingStep = 0,
   runningThreadIds = [],
+  t = defaultT,
 }) {
   const [currentProjectMenuOpen, setCurrentProjectMenuOpen] = useState(false);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
@@ -398,15 +401,15 @@ export default function ProjectPane({
   return (
     <aside className="project-pane" ref={paneRef}>
       <div className="sidebar-header">
-        <strong>项目</strong>
+        <strong>{t("common.project")}</strong>
         <div className="sidebar-header-actions">
           <span className={`connection-dot ${connectionState}`} title={`WebSocket ${connectionState}`} />
-          <IconButton label="全局设置" className="ghost" onClick={onOpenSettings}>
+          <IconButton label={t("project.global_settings")} className="ghost" onClick={onOpenSettings}>
             <Settings size={16} />
           </IconButton>
           <div className="project-menu-wrap" data-project-menu-root>
             <IconButton
-              label="创建或添加项目"
+              label={t("project.add_or_create")}
               className={projectMenuOpen ? "active" : ""}
               onClick={() => {
                 setProjectMenuOpen((open) => !open);
@@ -426,7 +429,7 @@ export default function ProjectPane({
                   }}
                 >
                   <FilePlus2 size={15} />
-                  <span>新建空白项目</span>
+                  <span>{t("project.create_blank")}</span>
                 </button>
                 <button
                   type="button"
@@ -436,7 +439,7 @@ export default function ProjectPane({
                   }}
                 >
                   <FolderOpen size={15} />
-                  <span>使用现有文件夹</span>
+                  <span>{t("project.use_existing_folder")}</span>
                 </button>
               </div>
             ) : null}
@@ -452,7 +455,7 @@ export default function ProjectPane({
             placeholder="/absolute/project/folder"
             autoComplete="off"
           />
-          <IconButton label="打开项目文件夹" className="primary" type="submit" disabled={!projectPath.trim()}>
+          <IconButton label={t("project.open_folder")} className="primary" type="submit" disabled={!projectPath.trim()}>
             <FolderOpen size={17} />
           </IconButton>
         </form>
@@ -498,21 +501,25 @@ export default function ProjectPane({
                 <button
                   className="project-disclosure"
                   type="button"
-                    aria-label={isExpanded ? "收起项目对话" : "展开项目对话"}
+                    aria-label={
+                      isExpanded
+                        ? t("project.collapse_threads")
+                        : t("project.expand_threads")
+                    }
                     onClick={() => onToggleProjectExpanded(entry.id)}
                   >
                     {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
                   </button>
                   <button className="project-select" type="button" title={entry.folder_path} onClick={() => onSelectProject(entry.id)}>
                     <Folder size={15} />
-                    <span className="project-label">
-                      <span className="project-name">{entry.name}</span>
-                      {isUnavailable ? <span className="project-state">{projectStatusLabel(entry.status)}</span> : null}
+                      <span className="project-label">
+                        <span className="project-name">{entry.name}</span>
+                      {isUnavailable ? <span className="project-state">{projectStatusLabel(entry.status, t)}</span> : null}
                     </span>
                   </button>
                   <div className="project-actions" data-project-menu-root>
                     <IconButton
-                      label="更多项目操作"
+                      label={t("project.more_actions")}
                       className={`ghost ${activeProjectMenuId === entry.id ? "active" : ""}`}
                       onClick={(event) => {
                         event.stopPropagation();
@@ -524,7 +531,7 @@ export default function ProjectPane({
                       <MoreHorizontal size={14} />
                     </IconButton>
                     <IconButton
-                      label="准备新会话"
+                      label={t("project.prepare_thread")}
                       className={`ghost ${isDraftProject ? "active" : ""}`}
                       disabled={isUnavailable}
                       onClick={(event) => {
@@ -538,9 +545,23 @@ export default function ProjectPane({
                       <Pencil size={14} />
                     </IconButton>
                     {activeProjectMenuId === entry.id ? (
-                      <div className="project-row-menu" role="menu">
-                          <button
-                            type="button"
+                      <div
+                        className="project-row-menu"
+                        role="menu"
+                        onPointerDown={(event) => event.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveProjectMenuId(null);
+                            onRenameProject?.(entry);
+                          }}
+                        >
+                          <Pencil size={15} />
+                          <span>{t("project.rename")}</span>
+                        </button>
+                        <button
+                          type="button"
                           disabled={isUnavailable}
                           onClick={() => {
                             setActiveProjectMenuId(null);
@@ -548,7 +569,7 @@ export default function ProjectPane({
                           }}
                         >
                           <Database size={15} />
-                          <span>数据库情况</span>
+                          <span>{t("project.database")}</span>
                         </button>
                         <button
                           type="button"
@@ -559,7 +580,7 @@ export default function ProjectPane({
                           }}
                         >
                           <Archive size={15} />
-                          <span>归档项目</span>
+                          <span>{t("project.archive")}</span>
                         </button>
                         <button
                           type="button"
@@ -570,7 +591,7 @@ export default function ProjectPane({
                           }}
                         >
                           <Archive size={15} />
-                          <span>归档对话</span>
+                          <span>{t("project.archive_threads")}</span>
                         </button>
                         <button
                           className="danger"
@@ -581,7 +602,7 @@ export default function ProjectPane({
                           }}
                         >
                           <Trash2 size={15} />
-                          <span>删除引用</span>
+                          <span>{t("project.delete_reference")}</span>
                         </button>
                       </div>
                     ) : null}
@@ -593,11 +614,15 @@ export default function ProjectPane({
                     {isCurrentProject ? (
                       <button className={`thread-create-row ${isDraftProject ? "active" : ""}`} type="button" onClick={() => onCreateThread(entry.id)}>
                         <Plus size={14} />
-                        <span>{isDraftProject ? "准备新对话" : "新对话"}</span>
+                        <span>
+                          {isDraftProject
+                            ? t("project.new_thread_ready")
+                            : t("project.new_thread")}
+                        </span>
                       </button>
                     ) : null}
                     {projectThreads.length === 0 ? (
-                      <div className="sidebar-empty-row">暂无对话</div>
+                      <div className="sidebar-empty-row">{t("project.no_threads")}</div>
                     ) : (
                       <>
                         {(() => {
@@ -652,15 +677,15 @@ export default function ProjectPane({
                               <button className="thread-select" type="button" title={thread.title} onClick={() => onSelectThread(thread.id, entry.id)}>
                                 <span className="thread-title-text">{thread.title}</span>
                                 <span className="thread-side-meta">
-                                  {running ? <span className="thread-running-dot" title="Agent running" /> : null}
-                                  <span>{formatRelativeTime(thread.updated_at)}</span>
+                                  {running ? <span className="thread-running-dot" title={t("project.agent_running")} /> : null}
+                                  <span>{formatRelativeTime(thread.updated_at, t)}</span>
                                   {index < 3 ? <kbd>⌘{index + 1}</kbd> : null}
                                 </span>
                               </button>
                               {canManage ? (
                               <span className="thread-actions">
                                   <IconButton
-                                    label="重命名对话"
+                                    label={t("project.rename_thread")}
                                     onClick={(event) => {
                                       event.stopPropagation();
                                       onRenameThread(thread);
@@ -669,7 +694,7 @@ export default function ProjectPane({
                                     <Pencil size={13} />
                                   </IconButton>
                                   <IconButton
-                                    label="归档对话"
+                                    label={t("app.archive_thread")}
                                     onClick={(event) => {
                                       event.stopPropagation();
                                       onDeleteThread(thread.id);
@@ -685,7 +710,11 @@ export default function ProjectPane({
                         })()}
                         {projectThreads.length > DEFAULT_THREAD_LIMIT ? (
                           <button className="thread-show-more" type="button" onClick={() => onToggleShowAllThreads(entry.id)}>
-                            {showAllThreads ? "收起显示" : `展开显示 ${hiddenThreadCount} 个`}
+                            {showAllThreads
+                              ? t("project.show_less")
+                              : t("project.show_more", {
+                                  count: hiddenThreadCount,
+                                })}
                           </button>
                         ) : null}
                       </>
@@ -697,24 +726,24 @@ export default function ProjectPane({
           })
         ) : (
           <div className="project-empty">
-            <strong>暂无项目</strong>
-            <span>通过文件夹加号添加本地项目。</span>
+            <strong>{t("project.empty_title")}</strong>
+            <span>{t("project.empty_body")}</span>
           </div>
         )}
       </div>
 
-      <div className="project-status" role="status" aria-label="Workspace status">
+      <div className="project-status" role="status" aria-label={t("app.workspace_views")}>
         <div className="project-status-item">
-          <span>WebSocket</span>
-          <strong>{connectionState}</strong>
+          <span>{t("project.websocket")}</span>
+          <strong>{t(`connection.${connectionState}`, {}, connectionState)}</strong>
         </div>
         <div className="project-status-item">
-          <span>Agent</span>
+          <span>{t("common.agent")}</span>
           <strong>
             {agentRunning ? (
               <ThinkingDots step={agentThinkingStep} />
             ) : (
-              "idle"
+              t("common.idle")
             )}
           </strong>
         </div>
@@ -744,26 +773,26 @@ function visibleProjectThreads(threads, showAll) {
   return threads.slice(0, DEFAULT_THREAD_LIMIT);
 }
 
-function projectStatusLabel(status) {
-  if (status === "missing") return "文件夹不可用";
-  if (status === "unavailable") return "数据库不可用";
-  return "不可用";
+function projectStatusLabel(status, t) {
+  if (status === "missing") return t("project.status_missing");
+  if (status === "unavailable") return t("project.status_unavailable");
+  return t("project.status_unknown");
 }
 
-function formatRelativeTime(value) {
+function formatRelativeTime(value, t) {
   if (!value) return "";
 
   const timestamp = Date.parse(value);
   if (!timestamp) return "";
 
   const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60000));
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分`;
+  if (minutes < 1) return t("time.now");
+  if (minutes < 60) return t("time.minutes_short", { count: minutes });
 
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 时`;
+  if (hours < 24) return t("time.hours_short", { count: hours });
 
-  return `${Math.floor(hours / 24)} 天`;
+  return t("time.days_short", { count: Math.floor(hours / 24) });
 }
 
 function mergeById(items) {

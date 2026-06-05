@@ -29,6 +29,51 @@ defmodule Avcs.Agent.Runner do
     end)
   end
 
+  def rerun_from_item(project, item_id, content, turn_settings \\ %{}) do
+    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
+    status = if pool_managed_client?(codex_client), do: "queued", else: "in_progress"
+
+    with {:ok, edited} <-
+           Avcs.Turns.edit_and_invalidate_after(project, item_id, content, status: status),
+         rerun_settings <- Map.merge(edited["turn_settings"] || %{}, turn_settings || %{}),
+         :ok <-
+           prepare_codex_thread_for_rerun(
+             codex_client,
+             project,
+             edited["turn"]["thread_id"],
+             edited["rollback_turn_count"],
+             rerun_settings
+           ),
+         {:ok, _pid} <-
+           start(
+             project,
+             edited["turn"]["thread_id"],
+             edited["turn"]["id"],
+             edited["item"]["content"],
+             edited["asset_ids"],
+             rerun_settings
+           ) do
+      Avcs.Events.broadcast("item:updated", %{
+        thread_id: edited["turn"]["thread_id"],
+        turn_id: edited["turn"]["id"],
+        item: edited["item"]
+      })
+
+      broadcast_thread_items(project, edited["turn"]["thread_id"])
+
+      Avcs.Events.broadcast("turn:started", %{
+        thread_id: edited["turn"]["thread_id"],
+        turn_id: edited["turn"]["id"],
+        turn: edited["turn"]
+      })
+
+      broadcast_threads(project)
+      Avcs.Projects.broadcast_projects_updated()
+
+      {:ok, edited}
+    end
+  end
+
   def respond_approval(thread_id, turn_id, payload) do
     case Registry.lookup(Avcs.Agent.RunnerRegistry, {thread_id, turn_id}) do
       [{pid, _value} | _rest] ->
@@ -216,6 +261,64 @@ defmodule Avcs.Agent.Runner do
   end
 
   defp data_provider(_turn_settings), do: nil
+
+  defp prepare_codex_thread_for_rerun(
+         _codex_client,
+         _project,
+         _thread_id,
+         rollback_count,
+         _settings
+       )
+       when not is_integer(rollback_count) or rollback_count <= 0 do
+    :ok
+  end
+
+  defp prepare_codex_thread_for_rerun(codex_client, project, thread_id, rollback_count, settings) do
+    with {:ok, %{"codex_thread_id" => codex_thread_id}}
+         when is_binary(codex_thread_id) and
+                codex_thread_id != "" <-
+           Avcs.Threads.get_thread(project, thread_id),
+         true <- module_exports?(codex_client, :fork_thread, 2),
+         true <- module_exports?(codex_client, :rollback_thread, 3),
+         {:ok, forked_thread} <- codex_client.fork_thread(codex_thread_id, Map.to_list(settings)),
+         forked_thread_id when is_binary(forked_thread_id) and forked_thread_id != "" <-
+           forked_thread["id"],
+         {:ok, rolled_back_thread} <-
+           codex_client.rollback_thread(forked_thread_id, rollback_count, []),
+         rolled_back_thread_id
+         when is_binary(rolled_back_thread_id) and rolled_back_thread_id != "" <-
+           rolled_back_thread["id"] || forked_thread_id,
+         :ok <-
+           persist_codex_thread_id(project, thread_id, rolled_back_thread_id, :edit_rerun) do
+      :ok
+    else
+      {:ok, _thread_without_codex_id} ->
+        :ok
+
+      false ->
+        fallback_to_new_codex_thread(project, thread_id, :unsupported)
+
+      {:error, reason} ->
+        fallback_to_new_codex_thread(project, thread_id, reason)
+
+      reason ->
+        fallback_to_new_codex_thread(project, thread_id, reason)
+    end
+  end
+
+  defp fallback_to_new_codex_thread(project, thread_id, reason) do
+    trace_event(project, %{
+      scope: "agent",
+      event_name: "edit_rerun_codex_thread_reset",
+      thread_id: thread_id,
+      payload: %{reason: inspect(reason)}
+    })
+
+    case Avcs.Threads.set_codex_thread_id(project, thread_id, nil) do
+      {:ok, :ok} -> :ok
+      {:error, error} -> {:error, error}
+    end
+  end
 
   defp create_and_start_turn(project, thread_id, text, asset_ids, turn_settings, codex_client) do
     status = if pool_managed_client?(codex_client), do: "queued", else: "in_progress"
@@ -1032,6 +1135,13 @@ defmodule Avcs.Agent.Runner do
 
       {:error, _reason} ->
         false
+    end
+  end
+
+  defp broadcast_thread_items(project, thread_id) do
+    case Avcs.Turns.list_items(project, thread_id) do
+      {:ok, items} -> Avcs.Events.broadcast("thread:items", %{thread_id: thread_id, items: items})
+      {:error, _reason} -> :ok
     end
   end
 

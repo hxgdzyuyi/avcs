@@ -23,7 +23,10 @@ import {
   Paperclip,
   Pencil,
   RotateCcw,
+  Redo2,
   SendToBack,
+  Trash2,
+  Undo2,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -54,12 +57,13 @@ const PROPORTIONAL_LAYOUT_GAP = 24;
 const PROPORTIONAL_LAYOUT_PADDING = 72;
 const PROPORTIONAL_MIN_ROW_WIDTH = 320;
 const OBJECT_MENU_WIDTH = 184;
-const OBJECT_MENU_HEIGHT = 156;
+const OBJECT_MENU_HEIGHT = 188;
 
 const BOARD_TABS = [
   ["output", "Output"],
   ["work", "Work"],
 ];
+const defaultT = (key, _params = {}, fallback = key) => fallback;
 
 export default function BoardPane({
   boardItems,
@@ -78,6 +82,15 @@ export default function BoardPane({
   collapsedLeftAndMiddle,
   onOpenShortcuts,
   onToggleLeftAndMiddle,
+  canUndo,
+  canRedo,
+  undoLabel,
+  redoLabel,
+  historyBusy,
+  onUndo,
+  onRedo,
+  onConfirm = async () => false,
+  t = defaultT,
 }) {
   const viewportRef = useRef(null);
   const cameraRef = useRef(DEFAULT_CAMERA);
@@ -110,11 +123,18 @@ export default function BoardPane({
     [objectMenu, visibleItems],
   );
   const zoomPercent = Math.round(camera.zoom * 100);
-  const referenceSelectedLabel = selectedItems.length > 1 ? `Reference ${selectedItems.length} selected images` : "Reference selected image";
-  const activeCount = activeTab === "work" ? workAssets.length : visibleItems.length;
-  const effectiveToolMode = spacePanActive ? "pan" : toolMode;
   const collapseShortcut = shortcutLabel({ mod: true, key: "\\" });
   const fitAllShortcut = shortcutLabel({ mod: true, key: "0" });
+  const undoShortcut = shortcutLabel({ mod: true, key: "z" });
+  const redoShortcut = shortcutLabel({ mod: true, shift: true, key: "z" });
+  const referenceSelectedLabel =
+    selectedItems.length > 1
+      ? t("board.reference_selected_count", { count: selectedItems.length })
+      : t("board.reference_selected");
+  const undoButtonLabel = `${t("board.undo")}${undoLabel ? ` ${undoLabel}` : ""} (${undoShortcut})`;
+  const redoButtonLabel = `${t("board.redo")}${redoLabel ? ` ${redoLabel}` : ""} (${redoShortcut})`;
+  const activeCount = activeTab === "work" ? workAssets.length : visibleItems.length;
+  const effectiveToolMode = spacePanActive ? "pan" : toolMode;
 
   useEffect(() => {
     cameraRef.current = camera;
@@ -190,6 +210,15 @@ export default function BoardPane({
       if (shouldIgnoreGlobalShortcut(event)) return;
       if (interactionRef.current) return;
 
+      const historyAction = boardHistoryActionFromKey(event);
+      if (historyAction) {
+        event.preventDefault();
+        if (historyBusy) return;
+        if (historyAction === "undo" && canUndo) onUndo?.();
+        if (historyAction === "redo" && canRedo) onRedo?.();
+        return;
+      }
+
       if (["Delete", "Backspace"].includes(event.key)) {
         if (selectedItems.length === 0) return;
 
@@ -258,8 +287,13 @@ export default function BoardPane({
     };
   }, [
     activeTab,
+    canRedo,
+    canUndo,
+    historyBusy,
     onDeleteSelected,
+    onRedo,
     onToggleLeftAndMiddle,
+    onUndo,
     selectedItem,
     selectedItems,
     visibleItems,
@@ -287,9 +321,18 @@ export default function BoardPane({
   }, [objectMenu]);
 
   useEffect(() => {
-    if (!focusRequest?.assetId) return;
-    const item = visibleItems.find((candidate) => candidate.asset_id === focusRequest.assetId);
-    const asset = assets.find((candidate) => candidate.id === focusRequest.assetId);
+    const assetIds = focusRequestAssetIds(focusRequest);
+    if (assetIds.length === 0) return;
+
+    const assetIdSet = new Set(assetIds);
+    const focusedItems = visibleItems.filter((candidate) =>
+      assetIdSet.has(candidate.asset_id),
+    );
+    const item = focusedItems[0] || null;
+    const asset =
+      assetIds.length === 1
+        ? assets.find((candidate) => candidate.id === assetIds[0])
+        : null;
 
     setLayoutMenu(null);
     setObjectMenu(null);
@@ -310,6 +353,7 @@ export default function BoardPane({
 
     setFocusedWorkAsset(null);
     setActiveTab("output");
+    setSelectedIds(focusedItems.map((candidate) => candidate.id));
     setPrimarySelectedId(item.id);
 
     let cancelled = false;
@@ -330,7 +374,18 @@ export default function BoardPane({
           return;
         }
 
-        centerItem(item);
+        if (
+          focusRequest.mode === "fit_if_outside" &&
+          itemsInViewport(focusedItems, cameraRef.current, viewportRef.current)
+        ) {
+          return;
+        }
+
+        if (focusedItems.length === 1) {
+          centerItem(item);
+        } else {
+          fitItems(focusedItems);
+        }
       });
     }
 
@@ -658,11 +713,7 @@ export default function BoardPane({
 
     const startItems = visibleItems
       .filter((candidate) => movingIds.includes(candidate.id))
-      .map((candidate) => ({
-        id: candidate.id,
-        x: Number(candidate.x),
-        y: Number(candidate.y),
-      }));
+      .map(boardItemHistorySnapshot);
 
     const start = {
       x: event.clientX,
@@ -708,7 +759,13 @@ export default function BoardPane({
         x: normalizeNumber(candidate.x + dx),
         y: normalizeNumber(candidate.y + dy),
       }));
-      onUpdateItems(updates, pointerEvent.type === "pointerup");
+      onUpdateItems(
+        updates,
+        pointerEvent.type === "pointerup",
+        pointerEvent.type === "pointerup"
+          ? { historyLabel: "Move", beforeSnapshot: start.items }
+          : {},
+      );
     }
 
     window.addEventListener("pointermove", move);
@@ -728,6 +785,7 @@ export default function BoardPane({
       zoom: cameraRef.current.zoom,
       width: Number(item.display_width),
       height: Number(item.display_height),
+      beforeSnapshot: [boardItemHistorySnapshot(item)],
     };
 
     function move(pointerEvent) {
@@ -744,7 +802,19 @@ export default function BoardPane({
 
       const width = Math.max(MIN_OBJECT_SIZE, start.width + (pointerEvent.clientX - start.x) / start.zoom);
       const height = Math.max(MIN_OBJECT_SIZE, start.height + (pointerEvent.clientY - start.y) / start.zoom);
-      onResize(item.id, normalizeNumber(width), normalizeNumber(height), true);
+      onUpdateItems(
+        [
+          {
+            id: item.id,
+            display_width: normalizeNumber(width),
+            display_height: normalizeNumber(height),
+          },
+        ],
+        pointerEvent.type === "pointerup",
+        pointerEvent.type === "pointerup"
+          ? { historyLabel: "Resize", beforeSnapshot: start.beforeSnapshot }
+          : {},
+      );
     }
 
     window.addEventListener("pointermove", move);
@@ -788,10 +858,10 @@ export default function BoardPane({
     const updates = selectedItems.map(actualSizeUpdate).filter(Boolean);
     setLayoutMenu(null);
     setObjectMenu(null);
-    if (updates.length > 0) onUpdateItems(updates, true);
+    if (updates.length > 0) onUpdateItems(updates, true, { historyLabel: "Actual size" });
   }
 
-  function arrangeAllByActualScale() {
+  async function arrangeAllByActualScale() {
     const updates = proportionalArrangeUpdates(
       visibleItems,
       viewportRef.current?.getBoundingClientRect(),
@@ -801,13 +871,16 @@ export default function BoardPane({
     setObjectMenu(null);
     if (updates.length === 0) return;
 
-    const confirmed = window.confirm(
-      `将按真实尺寸比例重排 ${visibleItems.length} 张 Output 图片，并保存位置和显示尺寸。确定继续？`,
-    );
+    const confirmed = await onConfirm({
+      title: t("app.arrange_output"),
+      message: t("app.arrange_output_message", { count: visibleItems.length }),
+      confirmLabel: t("board.arrange_actual"),
+      cancelLabel: t("common.cancel"),
+    });
     if (!confirmed) return;
 
     const nextItems = applyBoardItemUpdates(visibleItems, updates);
-    onUpdateItems(updates, true);
+    onUpdateItems(updates, true, { historyLabel: "Arrange" });
 
     window.requestAnimationFrame(() => {
       fitItems(nextItems);
@@ -834,7 +907,7 @@ export default function BoardPane({
     const updates = layoutUpdates(action, selectedItems, primarySelectedItem);
     setLayoutMenu(null);
     setObjectMenu(null);
-    if (updates.length > 0) onUpdateItems(updates, true);
+    if (updates.length > 0) onUpdateItems(updates, true, { historyLabel: layoutHistoryLabel(action) });
   }
 
   function openObjectMenu(item, event) {
@@ -860,28 +933,40 @@ export default function BoardPane({
 
     const updates = layerUpdates(action, visibleItems, objectMenu.selectedIds);
     setObjectMenu(null);
-    if (updates.length > 0) onUpdateItems(updates, true);
+    if (updates.length > 0) onUpdateItems(updates, true, { historyLabel: layerHistoryLabel(action) });
+  }
+
+  function deleteFromObjectMenu() {
+    if (!objectMenu) return;
+
+    const menuItems = visibleItems.filter((item) => objectMenu.selectedIds.includes(item.id));
+    const item = visibleItems.find((candidate) => candidate.id === objectMenu.itemId) || menuItems[0] || null;
+
+    setObjectMenu(null);
+    onDeleteSelected({ item, selectedCount: menuItems.length });
   }
 
   function applySelectedLayerAction(action) {
     const updates = layerUpdates(action, visibleItems, selectedIds);
     setLayoutMenu(null);
     setObjectMenu(null);
-    if (updates.length > 0) onUpdateItems(updates, true);
+    if (updates.length > 0) onUpdateItems(updates, true, { historyLabel: layerHistoryLabel(action) });
   }
 
   return (
     <section className="board-pane">
       <div className="pane-header">
         <div>
-          <span className="eyebrow">Board</span>
-          <h2>{activeTab === "work" ? "Work" : "Output"}</h2>
-          <span className="board-count">{activeCount} images</span>
+          <span className="eyebrow">{t("common.board")}</span>
+          <h2>{activeTab === "work" ? t("common.work") : t("common.output")}</h2>
+          <span className="board-count">
+            {t("board.image_count", { count: activeCount })}
+          </span>
         </div>
         <div className="board-controls">
           <IconButton
             className="board-collapse-toggle"
-            label={`${collapsedLeftAndMiddle ? "展开左栏与中栏" : "折叠左栏与中栏"} (${collapseShortcut})`}
+            label={`${collapsedLeftAndMiddle ? t("board.expand_panes") : t("board.collapse_panes")} (${collapseShortcut})`}
             aria-keyshortcuts={collapseShortcut}
             onClick={onToggleLeftAndMiddle}
           >
@@ -889,13 +974,13 @@ export default function BoardPane({
           </IconButton>
           <IconButton
             className="board-shortcuts-toggle"
-            label="Keyboard shortcuts (Shift+?)"
+            label={`${t("board.shortcuts")} (Shift+?)`}
             aria-keyshortcuts="Shift+?"
             onClick={onOpenShortcuts}
           >
             <HelpCircle size={15} />
           </IconButton>
-          <div className="segmented board-filter" role="tablist" aria-label="Board source">
+          <div className="segmented board-filter" role="tablist" aria-label={t("board.source")}>
             {BOARD_TABS.map(([value, label]) => (
               <button
                 aria-selected={activeTab === value}
@@ -905,7 +990,7 @@ export default function BoardPane({
                 key={value}
                 onClick={() => setActiveTab(value)}
               >
-                {label}
+                {value === "work" ? t("common.work") : t("common.output", {}, label)}
               </button>
             ))}
           </div>
@@ -920,6 +1005,7 @@ export default function BoardPane({
           onReferenceAsset={onReferenceAsset}
           onReveal={onReveal}
           onCopyPath={onCopyPath}
+          t={t}
         />
       ) : (
         <>
@@ -951,7 +1037,7 @@ export default function BoardPane({
               </div>
 
               <div className="board-overlay">
-                <div className="board-group-title">Output</div>
+                <div className="board-group-title">{t("common.output")}</div>
                 {selectedItems.map((item) => {
                   const asset = assets.find((candidate) => candidate.id === item.asset_id) || { ...item, id: item.asset_id };
 
@@ -963,6 +1049,7 @@ export default function BoardPane({
                       camera={camera}
                       selectedCount={selectedItems.length}
                       onResizeStart={selectedItems.length === 1 ? startResize : null}
+                      t={t}
                     />
                   );
                 })}
@@ -971,6 +1058,7 @@ export default function BoardPane({
                     bounds={selectionBounds}
                     camera={camera}
                     selectedCount={selectedItems.length}
+                    t={t}
                   />
                 ) : null}
                 {marquee ? <div className="board-marquee" style={rectStyle(marquee)} /> : null}
@@ -993,6 +1081,7 @@ export default function BoardPane({
                         : null
                     }
                     canTidy={selectedItems.length >= 2}
+                    t={t}
                   />
                 ) : null}
                 {objectMenu && objectMenuState ? (
@@ -1000,6 +1089,8 @@ export default function BoardPane({
                     menu={objectMenu}
                     state={objectMenuState}
                     onApply={applyLayerAction}
+                    onDelete={deleteFromObjectMenu}
+                    t={t}
                   />
                 ) : null}
               </div>
@@ -1007,7 +1098,7 @@ export default function BoardPane({
               {visibleItems.length === 0 ? (
                 <div className="empty-board">
                   <Image size={36} />
-                  <span>Output images appear here after generation or output scan.</span>
+                  <span>{t("board.empty_output")}</span>
                 </div>
               ) : null}
             </div>
@@ -1024,13 +1115,14 @@ export default function BoardPane({
               onReference={() => onReferenceAsset(previewAsset.id)}
               onReveal={() => onReveal(previewAsset.id)}
               onCopyPath={() => onCopyPath(previewAsset.id)}
+              t={t}
             />
           ) : null}
 
-          <div className="board-floating-tools" aria-label="Board tools">
+          <div className="board-floating-tools" aria-label={t("board.tools")}>
             <div className="board-tool-group">
               <IconButton
-                label="Select mode (V)"
+                label={`${t("board.select_mode")} (V)`}
                 aria-keyshortcuts="V"
                 className={toolMode === "select" ? "active" : ""}
                 onClick={() => setToolMode("select")}
@@ -1038,7 +1130,7 @@ export default function BoardPane({
                 <MousePointer2 size={15} />
               </IconButton>
               <IconButton
-                label="Pan mode (H)"
+                label={`${t("board.pan_mode")} (H)`}
                 aria-keyshortcuts="H"
                 className={toolMode === "pan" ? "active" : ""}
                 onClick={() => setToolMode("pan")}
@@ -1048,34 +1140,61 @@ export default function BoardPane({
               <IconButton label={referenceSelectedLabel} onClick={referenceSelectedItems} disabled={selectedItems.length === 0}>
                 <Paperclip size={15} />
               </IconButton>
-              <IconButton label="Open containing folder" onClick={() => selectedItem && onReveal(selectedItem.asset_id)} disabled={!selectedItem}>
+              <IconButton label={t("board.open_folder")} onClick={() => selectedItem && onReveal(selectedItem.asset_id)} disabled={!selectedItem}>
                 <FolderOpen size={15} />
               </IconButton>
-              <IconButton label={`Copy path${selectedAsset?.file_name ? ` for ${selectedAsset.file_name}` : ""}`} onClick={() => selectedItem && onCopyPath(selectedItem.asset_id)} disabled={!selectedItem}>
+              <IconButton
+                label={
+                  selectedAsset?.file_name
+                    ? t("board.copy_path_for", { name: selectedAsset.file_name })
+                    : t("board.copy_path")
+                }
+                onClick={() => selectedItem && onCopyPath(selectedItem.asset_id)}
+                disabled={!selectedItem}
+              >
                 <Copy size={15} />
               </IconButton>
             </div>
             <div className="board-tool-divider" />
             <div className="board-tool-group">
-              <IconButton label="Zoom in" onClick={() => zoomAtViewportCenter(BUTTON_ZOOM_FACTOR)} disabled={camera.zoom >= MAX_ZOOM}>
+              <IconButton
+                label={undoButtonLabel}
+                aria-keyshortcuts={undoShortcut}
+                onClick={onUndo}
+                disabled={!canUndo || historyBusy}
+              >
+                <Undo2 size={15} />
+              </IconButton>
+              <IconButton
+                label={redoButtonLabel}
+                aria-keyshortcuts={redoShortcut}
+                onClick={onRedo}
+                disabled={!canRedo || historyBusy}
+              >
+                <Redo2 size={15} />
+              </IconButton>
+            </div>
+            <div className="board-tool-divider" />
+            <div className="board-tool-group">
+              <IconButton label={t("board.zoom_in")} onClick={() => zoomAtViewportCenter(BUTTON_ZOOM_FACTOR)} disabled={camera.zoom >= MAX_ZOOM}>
                 <ZoomIn size={15} />
               </IconButton>
-              <IconButton label="Zoom out" onClick={() => zoomAtViewportCenter(1 / BUTTON_ZOOM_FACTOR)} disabled={camera.zoom <= MIN_ZOOM}>
+              <IconButton label={t("board.zoom_out")} onClick={() => zoomAtViewportCenter(1 / BUTTON_ZOOM_FACTOR)} disabled={camera.zoom <= MIN_ZOOM}>
                 <ZoomOut size={15} />
               </IconButton>
-              <IconButton label="Reset zoom" onClick={resetCamera}>
+              <IconButton label={t("board.reset_zoom")} onClick={resetCamera}>
                 <RotateCcw size={15} />
               </IconButton>
-              <IconButton label="Actual size" onClick={resizeSelectedToActualSize} disabled={selectedItems.length === 0}>
+              <IconButton label={t("board.actual_size")} onClick={resizeSelectedToActualSize} disabled={selectedItems.length === 0}>
                 <Image size={15} />
               </IconButton>
-              <IconButton label="Arrange all by actual scale" onClick={arrangeAllByActualScale} disabled={visibleItems.length === 0}>
+              <IconButton label={t("board.arrange_actual")} onClick={arrangeAllByActualScale} disabled={visibleItems.length === 0}>
                 <LayoutGrid size={15} />
               </IconButton>
-              <IconButton label="Fit selected (Shift+2)" aria-keyshortcuts="Shift+2" onClick={() => fitItems(selectedItems)} disabled={selectedItems.length === 0}>
+              <IconButton label={`${t("board.fit_selected")} (Shift+2)`} aria-keyshortcuts="Shift+2" onClick={() => fitItems(selectedItems)} disabled={selectedItems.length === 0}>
                 <Minimize2 size={15} />
               </IconButton>
-              <IconButton label={`Fit all (${fitAllShortcut})`} aria-keyshortcuts={fitAllShortcut} onClick={() => fitItems(visibleItems)} disabled={visibleItems.length === 0}>
+              <IconButton label={`${t("board.fit_all")} (${fitAllShortcut})`} aria-keyshortcuts={fitAllShortcut} onClick={() => fitItems(visibleItems)} disabled={visibleItems.length === 0}>
                 <Maximize2 size={15} />
               </IconButton>
               <span className="board-zoom-readout">{zoomPercent}%</span>
@@ -1094,6 +1213,7 @@ function WorkAssetList({
   onReferenceAsset,
   onReveal,
   onCopyPath,
+  t = defaultT,
 }) {
   const focusedRowRef = useRef(null);
 
@@ -1116,10 +1236,10 @@ function WorkAssetList({
       {assets.length === 0 ? (
         <div className="empty-work-assets">
           <Image size={34} />
-          <span>Work images appear here after import, upload, paste, or scan.</span>
+          <span>{t("board.empty_work")}</span>
         </div>
       ) : (
-        <div className="work-asset-list" role="list" aria-label="Work images">
+        <div className="work-asset-list" role="list" aria-label={t("board.work_images")}>
           {assets.map((asset) => {
             const focused = focusedAssetId === asset.id;
 
@@ -1146,13 +1266,13 @@ function WorkAssetList({
                   </span>
                 </button>
                 <div className="work-asset-actions">
-                  <IconButton label={`Reference ${asset.file_name}`} onClick={() => onReferenceAsset(asset.id)}>
+                  <IconButton label={t("board.reference_file", { name: asset.file_name })} onClick={() => onReferenceAsset(asset.id)}>
                     <Paperclip size={15} />
                   </IconButton>
-                  <IconButton label={`Open containing folder for ${asset.file_name}`} onClick={() => onReveal(asset.id)}>
+                  <IconButton label={t("board.open_folder_for", { name: asset.file_name })} onClick={() => onReveal(asset.id)}>
                     <FolderOpen size={15} />
                   </IconButton>
-                  <IconButton label={`Copy path for ${asset.file_name}`} onClick={() => onCopyPath(asset.id)}>
+                  <IconButton label={t("board.copy_path_for", { name: asset.file_name })} onClick={() => onCopyPath(asset.id)}>
                     <Copy size={15} />
                   </IconButton>
                 </div>
@@ -1347,12 +1467,12 @@ function applyBoardItemUpdates(items, updates) {
   }));
 }
 
-function ObjectLayerMenu({ menu, state, onApply }) {
+function ObjectLayerMenu({ menu, state, onApply, onDelete, t = defaultT }) {
   return (
     <div
       className="board-object-menu"
       role="menu"
-      aria-label="Board item layer order"
+      aria-label={t("board.item_actions")}
       style={{ left: `${menu.left}px`, top: `${menu.top}px` }}
       onContextMenu={(event) => event.preventDefault()}
       onPointerDown={(event) => event.stopPropagation()}
@@ -1364,7 +1484,7 @@ function ObjectLayerMenu({ menu, state, onApply }) {
         onClick={() => onApply("bring-forward")}
       >
         <ArrowUp size={14} />
-        <span>上移一层</span>
+        <span>{t("board.move_up")}</span>
       </button>
       <button
         type="button"
@@ -1373,7 +1493,7 @@ function ObjectLayerMenu({ menu, state, onApply }) {
         onClick={() => onApply("send-backward")}
       >
         <ArrowDown size={14} />
-        <span>下移一层</span>
+        <span>{t("board.move_down")}</span>
       </button>
       <button
         type="button"
@@ -1382,7 +1502,7 @@ function ObjectLayerMenu({ menu, state, onApply }) {
         onClick={() => onApply("bring-to-front")}
       >
         <BringToFront size={14} />
-        <span>移动至顶层</span>
+        <span>{t("board.move_to_front")}</span>
       </button>
       <button
         type="button"
@@ -1391,13 +1511,22 @@ function ObjectLayerMenu({ menu, state, onApply }) {
         onClick={() => onApply("send-to-back")}
       >
         <SendToBack size={14} />
-        <span>移动至底层</span>
+        <span>{t("board.move_to_back")}</span>
+      </button>
+      <button
+        className="danger"
+        type="button"
+        role="menuitem"
+        onClick={onDelete}
+      >
+        <Trash2 size={14} />
+        <span>{t("board.delete")}</span>
       </button>
     </div>
   );
 }
 
-function SelectionOverlay({ item, asset, camera, selectedCount, onResizeStart }) {
+function SelectionOverlay({ item, asset, camera, selectedCount, onResizeStart, t = defaultT }) {
   const bounds = worldBoundsToScreen(item, camera);
   const style = {
     left: `${bounds.left}px`,
@@ -1415,7 +1544,7 @@ function SelectionOverlay({ item, asset, camera, selectedCount, onResizeStart })
           <span className="control-point nw" />
           <span className="control-point ne" />
           <span className="control-point sw" />
-          <button className="resize-handle control-point se" type="button" aria-label="Resize image" onPointerDown={(event) => onResizeStart?.(item, event)} />
+          <button className="resize-handle control-point se" type="button" aria-label={t("board.resize_image")} onPointerDown={(event) => onResizeStart?.(item, event)} />
           <div className="object-label">
             <strong>{asset.file_name}</strong>
             <span>
@@ -1428,7 +1557,7 @@ function SelectionOverlay({ item, asset, camera, selectedCount, onResizeStart })
   );
 }
 
-function SelectionBounds({ bounds, camera, selectedCount }) {
+function SelectionBounds({ bounds, camera, selectedCount, t = defaultT }) {
   const screenBounds = worldBoundsToScreen(
     {
       x: bounds.x,
@@ -1441,7 +1570,7 @@ function SelectionBounds({ bounds, camera, selectedCount }) {
 
   return (
     <div className="board-selection-bounds" style={rectStyle(screenBounds)}>
-      <span>{selectedCount} selected</span>
+      <span>{t("board.selected_count", { count: selectedCount })}</span>
     </div>
   );
 }
@@ -1456,6 +1585,7 @@ function LayoutToolbar({
   onEdit,
   onReference,
   canTidy,
+  t = defaultT,
 }) {
   const compact = Boolean((onEdit || onReference) && !canTidy);
   const position = layoutToolbarPosition(bounds, camera, viewportRef.current, { compact });
@@ -1469,49 +1599,49 @@ function LayoutToolbar({
       {onEdit ? (
         <button className="board-layout-trigger edit" type="button" onClick={onEdit}>
           <Pencil size={13} />
-          <span>编辑</span>
+          <span>{t("common.edit")}</span>
         </button>
       ) : null}
       {onReference ? (
         <button
-          aria-label="Reference selected image"
+          aria-label={t("board.reference_selected")}
           className="board-layout-trigger reference"
-          title="Reference selected image"
+          title={t("board.reference_selected")}
           type="button"
           onClick={onReference}
         >
           <Paperclip size={13} />
-          <span>引用</span>
+          <span>{t("board.reference")}</span>
         </button>
       ) : null}
       {canTidy ? (
         <>
           <ToolbarMenu
             name="align"
-            label="Align"
+            label={t("board.align")}
             open={layoutMenu === "align"}
             setLayoutMenu={setLayoutMenu}
             items={[
-              ["align-left", "Align Left", <AlignStartVertical size={14} />],
-              ["align-center-x", "Horizontal Center", <AlignCenterVertical size={14} />],
-              ["align-right", "Align Right", <AlignEndVertical size={14} />],
-              ["align-top", "Align Top", <AlignStartHorizontal size={14} />],
-              ["align-center-y", "Vertical Center", <AlignCenterHorizontal size={14} />],
-              ["align-bottom", "Align Bottom", <AlignEndHorizontal size={14} />],
-              ["normalize-width", "Normalize Width"],
-              ["normalize-height", "Normalize Height"],
+              ["align-left", t("board.align_left"), <AlignStartVertical size={14} />],
+              ["align-center-x", t("board.align_center_x"), <AlignCenterVertical size={14} />],
+              ["align-right", t("board.align_right"), <AlignEndVertical size={14} />],
+              ["align-top", t("board.align_top"), <AlignStartHorizontal size={14} />],
+              ["align-center-y", t("board.align_center_y"), <AlignCenterHorizontal size={14} />],
+              ["align-bottom", t("board.align_bottom"), <AlignEndHorizontal size={14} />],
+              ["normalize-width", t("board.normalize_width")],
+              ["normalize-height", t("board.normalize_height")],
             ]}
             onApply={onApply}
           />
           <ToolbarMenu
             name="tidy"
-            label="Tidy"
+            label={t("board.tidy")}
             open={layoutMenu === "tidy"}
             setLayoutMenu={setLayoutMenu}
             menuClassName="wide"
             items={[
-              ["tidy-horizontal", "Tidy Horizontal Space", null, !canTidy],
-              ["tidy-vertical", "Tidy Vertical Space", null, !canTidy],
+              ["tidy-horizontal", t("board.tidy_horizontal"), null, !canTidy],
+              ["tidy-vertical", t("board.tidy_vertical"), null, !canTidy],
             ]}
             onApply={onApply}
           />
@@ -1545,6 +1675,15 @@ function isSpaceKey(event) {
   return event.key === " " || event.key === "Spacebar" || event.code === "Space";
 }
 
+function boardHistoryActionFromKey(event) {
+  if (event.altKey || !(event.ctrlKey || event.metaKey)) return null;
+
+  const key = String(event.key || "").toLowerCase();
+  if (key === "z") return event.shiftKey ? "redo" : "undo";
+  if (key === "y" && event.ctrlKey && !event.metaKey && !event.shiftKey) return "redo";
+  return null;
+}
+
 function layerActionFromKey(event) {
   if (event.ctrlKey || event.metaKey || event.altKey) return null;
 
@@ -1556,6 +1695,17 @@ function layerActionFromKey(event) {
   if (bracketRight) return event.shiftKey ? "bring-to-front" : "bring-forward";
   if (bracketLeft) return event.shiftKey ? "send-to-back" : "send-backward";
   return null;
+}
+
+function boardItemHistorySnapshot(item) {
+  return {
+    id: item.id,
+    x: normalizeNumber(item.x),
+    y: normalizeNumber(item.y),
+    display_width: normalizeNumber(item.display_width),
+    display_height: normalizeNumber(item.display_height),
+    z_index: positiveInteger(item.z_index),
+  };
 }
 
 function isWorkAsset(asset) {
@@ -1574,6 +1724,16 @@ function assetDimensions(asset) {
   }
 
   return "Image";
+}
+
+function focusRequestAssetIds(focusRequest) {
+  const ids = Array.isArray(focusRequest?.assetIds)
+    ? focusRequest.assetIds
+    : focusRequest?.assetId
+      ? [focusRequest.assetId]
+      : [];
+
+  return [...new Set(ids.filter((id) => typeof id === "string" && id.trim() !== ""))];
 }
 
 function screenToWorld(point, camera) {
@@ -1657,6 +1817,25 @@ function getItemsBounds(items) {
     width: Math.max(1, right - left),
     height: Math.max(1, bottom - top),
   };
+}
+
+function itemsInViewport(items, camera, viewport) {
+  const rect = viewport?.getBoundingClientRect();
+  const bounds = getItemsBounds(items);
+  if (!rect || rect.width <= 0 || rect.height <= 0 || !bounds) return false;
+
+  const padding = 16;
+  const left = (bounds.x - camera.x) * camera.zoom;
+  const top = (bounds.y - camera.y) * camera.zoom;
+  const right = left + bounds.width * camera.zoom;
+  const bottom = top + bounds.height * camera.zoom;
+
+  return (
+    left >= padding &&
+    top >= padding &&
+    right <= rect.width - padding &&
+    bottom <= rect.height - padding
+  );
 }
 
 function itemWorldRect(item) {
@@ -1821,6 +2000,34 @@ function layerOrderedItems(items) {
     .map(({ item }) => item);
 }
 
+function layoutHistoryLabel(action) {
+  const labels = {
+    "align-left": "Align",
+    "align-center-x": "Align",
+    "align-right": "Align",
+    "align-top": "Align",
+    "align-center-y": "Align",
+    "align-bottom": "Align",
+    "normalize-width": "Normalize width",
+    "normalize-height": "Normalize height",
+    "tidy-horizontal": "Tidy",
+    "tidy-vertical": "Tidy",
+  };
+
+  return labels[action] || "Layout";
+}
+
+function layerHistoryLabel(action) {
+  const labels = {
+    "bring-forward": "Layer order",
+    "send-backward": "Layer order",
+    "bring-to-front": "Layer order",
+    "send-to-back": "Layer order",
+  };
+
+  return labels[action] || "Layer order";
+}
+
 function layoutUpdates(action, items, primaryItem) {
   if (items.length < 2) return [];
 
@@ -1915,6 +2122,11 @@ function positiveNumber(value) {
   const number = Number(value);
   if (!Number.isFinite(number) || number <= 0) return null;
   return number;
+}
+
+function positiveInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : 1;
 }
 
 function clamp(value, min, max) {

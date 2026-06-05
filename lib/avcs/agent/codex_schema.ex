@@ -14,6 +14,8 @@ defmodule Avcs.Agent.CodexSchema do
     item_started_notification: "v2/ItemStartedNotification.json",
     model_list_params: "v2/ModelListParams.json",
     model_list_response: "v2/ModelListResponse.json",
+    thread_fork_params: "v2/ThreadForkParams.json",
+    thread_fork_response: "v2/ThreadForkResponse.json",
     thread_approve_guardian_denied_action_params:
       "v2/ThreadApproveGuardianDeniedActionParams.json",
     thread_approve_guardian_denied_action_response:
@@ -21,6 +23,8 @@ defmodule Avcs.Agent.CodexSchema do
     thread_name_updated_notification: "v2/ThreadNameUpdatedNotification.json",
     thread_read_params: "v2/ThreadReadParams.json",
     thread_read_response: "v2/ThreadReadResponse.json",
+    thread_rollback_params: "v2/ThreadRollbackParams.json",
+    thread_rollback_response: "v2/ThreadRollbackResponse.json",
     thread_resume_params: "v2/ThreadResumeParams.json",
     thread_resume_response: "v2/ThreadResumeResponse.json",
     thread_start_params: "v2/ThreadStartParams.json",

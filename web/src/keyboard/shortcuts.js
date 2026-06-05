@@ -14,16 +14,19 @@ export const SHORTCUT_GUIDE_SECTIONS = [
     rows: [
       {
         action: "Insert newline",
+        actionKey: "shortcuts.action.insert_newline",
         windows: "Shift+Enter",
         mac: "Shift+Enter",
       },
       {
         action: "Paste clipboard image as reference",
+        actionKey: "shortcuts.action.paste_image",
         windows: "Ctrl+V",
         mac: "Cmd+V",
       },
       {
         action: "Send prompt",
+        actionKey: "shortcuts.action.send_prompt",
         windows: "Enter or Ctrl+Enter",
         mac: "Enter or Cmd+Enter",
       },
@@ -33,19 +36,28 @@ export const SHORTCUT_GUIDE_SECTIONS = [
     id: "board",
     title: "Board",
     rows: [
-      { action: "Select tool", windows: "V", mac: "V" },
-      { action: "Hand tool", windows: "H", mac: "H" },
+      { action: "Select tool", actionKey: "shortcuts.action.select_tool", windows: "V", mac: "V" },
+      { action: "Hand tool", actionKey: "shortcuts.action.hand_tool", windows: "H", mac: "H" },
       {
         action: "Temporary pan",
+        actionKey: "shortcuts.action.temporary_pan",
         windows: "Hold Space + drag",
         mac: "Hold Space + drag",
       },
-      { action: "Zoom", windows: "Ctrl + wheel", mac: "Cmd + wheel" },
-      { action: "Fit selected", windows: "Shift+2", mac: "Shift+2" },
-      { action: "Fit all", windows: "Ctrl+0", mac: "Cmd+0" },
-      { action: "Show or hide UI", windows: "Ctrl+\\", mac: "Cmd+\\" },
+      { action: "Zoom", actionKey: "shortcuts.action.zoom", windows: "Ctrl + wheel", mac: "Cmd + wheel" },
+      { action: "Fit selected", actionKey: "shortcuts.action.fit_selected", windows: "Shift+2", mac: "Shift+2" },
+      { action: "Fit all", actionKey: "shortcuts.action.fit_all", windows: "Ctrl+0", mac: "Cmd+0" },
+      { action: "Show or hide UI", actionKey: "shortcuts.action.toggle_ui", windows: "Ctrl+\\", mac: "Cmd+\\" },
+      { action: "Undo board edit", actionKey: "shortcuts.action.undo_board", windows: "Ctrl+Z", mac: "Cmd+Z" },
+      {
+        action: "Redo board edit",
+        actionKey: "shortcuts.action.redo_board",
+        windows: "Ctrl+Shift+Z or Ctrl+Y",
+        mac: "Cmd+Shift+Z",
+      },
       {
         action: "Delete selected output image",
+        actionKey: "shortcuts.action.delete_selected",
         windows: "Delete or Backspace",
         mac: "Delete or Backspace",
       },
@@ -55,17 +67,17 @@ export const SHORTCUT_GUIDE_SECTIONS = [
     id: "layers",
     title: "Layers",
     rows: [
-      { action: "Bring forward", windows: "]", mac: "]" },
-      { action: "Send backward", windows: "[", mac: "[" },
-      { action: "Bring to front", windows: "Shift+]", mac: "Shift+]" },
-      { action: "Send to back", windows: "Shift+[", mac: "Shift+[" },
+      { action: "Bring forward", actionKey: "shortcuts.action.bring_forward", windows: "]", mac: "]" },
+      { action: "Send backward", actionKey: "shortcuts.action.send_backward", windows: "[", mac: "[" },
+      { action: "Bring to front", actionKey: "shortcuts.action.bring_to_front", windows: "Shift+]", mac: "Shift+]" },
+      { action: "Send to back", actionKey: "shortcuts.action.send_to_back", windows: "Shift+[", mac: "Shift+[" },
     ],
   },
   {
     id: "app",
     title: "App",
     rows: [
-      { action: "Open shortcuts", windows: "Shift+?", mac: "Shift+?" },
+      { action: "Open shortcuts", actionKey: "shortcuts.action.open_shortcuts", windows: "Shift+?", mac: "Shift+?" },
     ],
   },
 ];

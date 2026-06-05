@@ -5,7 +5,7 @@ defmodule Avcs.Projects do
 
   alias Avcs.Storage.SQLite
 
-  @schema_version "4"
+  @schema_version "5"
   @project_sqlite_optimized_meta_key "project_sqlite_optimized_at"
   @project_sqlite_row_tables ~w(threads turns items assets board_items asset_links trace_events)
 
@@ -235,6 +235,37 @@ defmodule Avcs.Projects do
       {:ok, enrich_project_index(project)}
     end
   end
+
+  def rename_project(id, name) when is_binary(id) do
+    with {:ok, clean_name} <- clean_project_display_name(name),
+         {:ok, _} <- migrate_global_db(),
+         {:ok, _project} <- fetch_global_project(id),
+         {:ok, renamed_project} <-
+           SQLite.with_db(global_db_path(), fn db ->
+             now = Avcs.Time.now_iso()
+
+             SQLite.run!(
+               db,
+               "UPDATE projects SET name = ?, updated_at = ? WHERE id = ?",
+               [clean_name, now, id]
+             )
+
+             SQLite.one!(db, "SELECT * FROM projects WHERE id = ? LIMIT 1", [id])
+           end) do
+      renamed_project =
+        renamed_project
+        |> enrich_project_index()
+        |> sync_current_project_after_rename()
+
+      broadcast_projects_updated()
+      {:ok, renamed_project}
+    else
+      {:error, "Project not found"} -> {:error, :project_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def rename_project(_id, _name), do: {:error, :project_not_found}
 
   def archive_project(id) when is_binary(id) do
     with {:ok, _} <- migrate_global_db(),
@@ -811,6 +842,25 @@ defmodule Avcs.Projects do
     end
   end
 
+  defp sync_current_project_after_rename(%{"id" => id} = renamed_project) do
+    case current_project() do
+      %{"id" => ^id} = current_project ->
+        renamed_project =
+          Map.put(
+            renamed_project,
+            "current_thread_id",
+            current_project["current_thread_id"]
+          )
+
+        :ok = Avcs.Session.set_current_project(renamed_project)
+        Avcs.Events.broadcast("project:updated", %{project: renamed_project})
+        renamed_project
+
+      _project ->
+        renamed_project
+    end
+  end
+
   defp maybe_scan_project_on_open(project) do
     case Avcs.SiteSettings.get_setting("assets.scan_on_open") do
       {:ok, true} ->
@@ -886,6 +936,15 @@ defmodule Avcs.Projects do
     end
   end
 
+  defp clean_project_display_name(raw_name) when is_binary(raw_name) do
+    case clean_project_name(raw_name) do
+      {:ok, name} -> {:ok, name}
+      {:error, _reason} -> {:error, :invalid_project_name}
+    end
+  end
+
+  defp clean_project_display_name(_raw_name), do: {:error, :invalid_project_name}
+
   defp unique_blank_project_path(root, name) do
     root = Path.expand(root)
 
@@ -938,10 +997,10 @@ defmodule Avcs.Projects do
             db,
             """
             UPDATE projects
-            SET name = ?, project_db_path = ?, archived_at = NULL, updated_at = ?, last_opened_at = ?, sidebar_order = COALESCE(sidebar_order, 0)
+            SET project_db_path = ?, archived_at = NULL, updated_at = ?, last_opened_at = ?, sidebar_order = COALESCE(sidebar_order, 0)
             WHERE id = ?
             """,
-            [name, project_db_path, now, now, id]
+            [project_db_path, now, now, id]
           )
         else
           sidebar_order = next_project_sidebar_order(db)
@@ -1006,6 +1065,8 @@ defmodule Avcs.Projects do
         data_provider TEXT,
         completed_at TEXT,
         error TEXT,
+        invalidated_at TEXT,
+        invalidated_by_item_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(thread_id) REFERENCES threads(id)
@@ -1021,6 +1082,8 @@ defmodule Avcs.Projects do
         content TEXT,
         payload TEXT,
         status TEXT,
+        invalidated_at TEXT,
+        invalidated_by_item_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(turn_id) REFERENCES turns(id),
@@ -1054,6 +1117,8 @@ defmodule Avcs.Projects do
         turn_id TEXT,
         item_id TEXT,
         source TEXT NOT NULL,
+        invalidated_at TEXT,
+        invalidated_by_item_id TEXT,
         created_at TEXT NOT NULL,
         FOREIGN KEY(asset_id) REFERENCES assets(id)
       );
@@ -1070,6 +1135,8 @@ defmodule Avcs.Projects do
         display_height REAL NOT NULL,
         z_index INTEGER NOT NULL,
         source TEXT NOT NULL,
+        invalidated_at TEXT,
+        invalidated_by_item_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY(asset_id) REFERENCES assets(id)
@@ -1136,11 +1203,27 @@ defmodule Avcs.Projects do
       ensure_column(db, "turns", "data_provider", "TEXT")
       ensure_column(db, "turns", "completed_at", "TEXT")
       ensure_column(db, "turns", "error", "TEXT")
+      ensure_column(db, "turns", "invalidated_at", "TEXT")
+      ensure_column(db, "turns", "invalidated_by_item_id", "TEXT")
       ensure_column(db, "items", "codex_item_id", "TEXT")
+      ensure_column(db, "items", "invalidated_at", "TEXT")
+      ensure_column(db, "items", "invalidated_by_item_id", "TEXT")
+      ensure_column(db, "asset_links", "invalidated_at", "TEXT")
+      ensure_column(db, "asset_links", "invalidated_by_item_id", "TEXT")
+      ensure_column(db, "board_items", "invalidated_at", "TEXT")
+      ensure_column(db, "board_items", "invalidated_by_item_id", "TEXT")
 
       SQLite.exec!(
         db,
-        "CREATE INDEX IF NOT EXISTS idx_items_codex_item_id ON items(codex_item_id);"
+        """
+        CREATE INDEX IF NOT EXISTS idx_items_codex_item_id ON items(codex_item_id);
+        CREATE INDEX IF NOT EXISTS idx_turns_invalidated
+          ON turns(thread_id, invalidated_at);
+        CREATE INDEX IF NOT EXISTS idx_items_invalidated
+          ON items(thread_id, invalidated_at);
+        CREATE INDEX IF NOT EXISTS idx_board_items_invalidated
+          ON board_items(thread_id, invalidated_at);
+        """
       )
 
       now = Avcs.Time.now_iso()

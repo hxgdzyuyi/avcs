@@ -203,6 +203,40 @@ defmodule Avcs.Agent.RunnerTest do
     end
   end
 
+  defmodule EditRerunCodexClient do
+    def fork_thread(codex_thread_id, _opts) do
+      send(Application.fetch_env!(:avcs, :agent_runner_test_pid), {:fork_thread, codex_thread_id})
+      {:ok, %{"id" => "codex-thread-forked"}}
+    end
+
+    def rollback_thread(codex_thread_id, num_turns, _opts) do
+      send(Application.fetch_env!(:avcs, :agent_runner_test_pid), {
+        :rollback_thread,
+        codex_thread_id,
+        num_turns
+      })
+
+      {:ok, %{"id" => codex_thread_id}}
+    end
+
+    def run_turn(_project, codex_thread_id, text, _reference_paths, _on_event, _settings) do
+      send(Application.fetch_env!(:avcs, :agent_runner_test_pid), {
+        :rerun_turn,
+        codex_thread_id,
+        text
+      })
+
+      {:ok,
+       %{
+         codex_thread_id: codex_thread_id,
+         codex_turn_id: "codex-rerun-turn",
+         assistant_text: "Rerun done",
+         items: [],
+         thread_name: nil
+       }}
+    end
+  end
+
   setup do
     previous_client = Application.get_env(:avcs, :codex_client)
     previous_codex_home = Application.get_env(:avcs, :codex_home)
@@ -564,6 +598,49 @@ defmodule Avcs.Agent.RunnerTest do
     assert synced["codex_thread_id"] == "codex-thread-1"
   end
 
+  test "rerun_from_item forks and rolls back Codex thread before restarting edited turn", %{
+    project: project
+  } do
+    Application.put_env(:avcs, :codex_client, EditRerunCodexClient)
+    Application.put_env(:avcs, :agent_runner_test_pid, self())
+
+    {:ok, thread} = Avcs.Threads.create_thread(project, "Edit rerun")
+
+    assert {:ok, :ok} =
+             Avcs.Threads.set_codex_thread_id(project, thread["id"], "codex-thread-old")
+
+    {:ok, first} = Avcs.Turns.create_user_turn(project, thread["id"], "Original prompt", [])
+    {:ok, _turn} = Avcs.Turns.complete_turn(project, first["turn"]["id"], "codex-turn-old-1")
+    set_turn_time(project, first["turn"]["id"], 1)
+
+    {:ok, second} = Avcs.Turns.create_user_turn(project, thread["id"], "Later prompt", [])
+    {:ok, _turn} = Avcs.Turns.complete_turn(project, second["turn"]["id"], "codex-turn-old-2")
+    set_turn_time(project, second["turn"]["id"], 2)
+
+    assert {:ok, edited} =
+             Avcs.Agent.Runner.rerun_from_item(project, first["item"]["id"], "Revised prompt")
+
+    assert edited["turn"]["id"] == first["turn"]["id"]
+    assert edited["invalidated_turn_ids"] == [second["turn"]["id"]]
+
+    assert_receive {:fork_thread, "codex-thread-old"}, 1_000
+    assert_receive {:rollback_thread, "codex-thread-forked", 2}, 1_000
+    assert_receive {:rerun_turn, "codex-thread-forked", "Revised prompt"}, 1_000
+
+    wait_until(fn ->
+      {:ok, items} = Avcs.Turns.list_items(project, thread["id"])
+      Enum.any?(items, &(&1["type"] == "assistant_message" and &1["content"] == "Rerun done"))
+    end)
+
+    {:ok, synced} = Avcs.Threads.get_thread(project, thread["id"])
+    assert synced["codex_thread_id"] == "codex-thread-forked"
+
+    {:ok, turns} = Avcs.Turns.list_turns(project, thread["id"])
+    assert Enum.map(turns, & &1["id"]) == [first["turn"]["id"]]
+    assert hd(turns)["codex_turn_id"] == "codex-rerun-turn"
+    assert hd(turns)["status"] == "completed"
+  end
+
   test "persists Codex thread id from turn_started before run completion", %{project: project} do
     Application.put_env(:avcs, :codex_client, TurnStartedCodexClient)
 
@@ -631,5 +708,44 @@ defmodule Avcs.Agent.RunnerTest do
     Base.decode64!(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3teQAAAABJRU5ErkJggg=="
     )
+  end
+
+  defp set_turn_time(project, turn_id, index) do
+    timestamp = "2026-06-03T10:00:#{String.pad_leading(to_string(index), 2, "0")}Z"
+
+    assert {:ok, :ok} =
+             Avcs.Storage.SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+               Avcs.Storage.SQLite.run!(
+                 db,
+                 "UPDATE turns SET created_at = ?, updated_at = ? WHERE id = ?",
+                 [timestamp, timestamp, turn_id]
+               )
+
+               Avcs.Storage.SQLite.run!(
+                 db,
+                 "UPDATE items SET created_at = ?, updated_at = ? WHERE turn_id = ?",
+                 [timestamp, timestamp, turn_id]
+               )
+
+               :ok
+             end)
+  end
+
+  defp wait_until(fun) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_wait_until(fun, deadline)
+  end
+
+  defp do_wait_until(fun, deadline) do
+    if fun.() do
+      :ok
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        flunk("condition was not met before timeout")
+      else
+        Process.sleep(10)
+        do_wait_until(fun, deadline)
+      end
+    end
   end
 end

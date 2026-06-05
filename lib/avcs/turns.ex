@@ -5,6 +5,7 @@ defmodule Avcs.Turns do
 
   @default_page_limit 30
   @max_page_limit 100
+  @running_statuses ~w(queued in_progress waiting_approval)
 
   def list_items(project, thread_id) do
     with_project_db(project, fn db ->
@@ -21,6 +22,8 @@ defmodule Avcs.Turns do
         FROM items
         LEFT JOIN turns ON turns.id = items.turn_id
         WHERE items.thread_id = ?
+          AND items.invalidated_at IS NULL
+          AND COALESCE(turns.invalidated_at, '') = ''
         ORDER BY items.created_at ASC
         """,
         [thread_id]
@@ -160,6 +163,20 @@ defmodule Avcs.Turns do
     end)
   end
 
+  def edit_and_invalidate_after(project, item_id, content, opts \\ []) do
+    status = attr(opts, :status) || "in_progress"
+
+    case with_project_db(project, fn db ->
+           SQLite.transaction!(db, fn ->
+             do_edit_and_invalidate_after(project, db, item_id, content, status)
+           end)
+         end) do
+      {:ok, {:error, _reason} = error} -> error
+      {:ok, result} -> {:ok, result}
+      error -> error
+    end
+  end
+
   def list_turns(project, thread_id) do
     with_project_db(project, fn db ->
       SQLite.all!(
@@ -168,6 +185,7 @@ defmodule Avcs.Turns do
         SELECT *
         FROM turns
         WHERE thread_id = ?
+          AND invalidated_at IS NULL
         ORDER BY created_at ASC
         """,
         [thread_id]
@@ -466,53 +484,402 @@ defmodule Avcs.Turns do
   end
 
   def update_turn_status(project, turn_id, status, codex_turn_id, error \\ nil) do
-    with_project_db(project, fn db ->
-      SQLite.transaction!(db, fn ->
-        existing = SQLite.one!(db, "SELECT * FROM turns WHERE id = ? LIMIT 1", [turn_id])
-        now = Avcs.Time.now_iso()
-        completed_at = if status in ["completed", "failed", "interrupted"], do: now
+    case with_project_db(project, fn db ->
+           SQLite.transaction!(db, fn ->
+             existing = SQLite.one!(db, "SELECT * FROM turns WHERE id = ? LIMIT 1", [turn_id])
 
-        SQLite.run!(
-          db,
-          """
-          UPDATE turns
-          SET status = ?,
-              codex_turn_id = COALESCE(?, codex_turn_id),
-              completed_at = COALESCE(?, completed_at),
-              error = COALESCE(?, error),
-              updated_at = ?
-          WHERE id = ?
-          """,
-          [status, codex_turn_id, completed_at, error, now, turn_id]
-        )
+             if is_nil(existing) do
+               {:error, :turn_not_found}
+             else
+               now = Avcs.Time.now_iso()
+               completed_at = if status in ["completed", "failed", "interrupted"], do: now
 
-        turn = decode_turn(SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn_id]))
+               SQLite.run!(
+                 db,
+                 """
+                 UPDATE turns
+                 SET status = ?,
+                     codex_turn_id = COALESCE(?, codex_turn_id),
+                     completed_at = COALESCE(?, completed_at),
+                     error = COALESCE(?, error),
+                     updated_at = ?
+                 WHERE id = ?
+                 """,
+                 [status, codex_turn_id, completed_at, error, now, turn_id]
+               )
 
-        if trace_turn_update?(existing, turn, status, codex_turn_id, error) do
-          Avcs.Trace.append_event(
-            project,
-            %{
-              scope: "turn",
-              event_name: turn_event_name(existing, turn),
-              thread_id: turn["thread_id"],
-              turn_id: turn_id,
-              codex_turn_id: turn["codex_turn_id"],
-              status: turn["status"],
-              payload: %{
-                from_status: existing && existing["status"],
-                to_status: turn["status"],
-                previous_codex_turn_id: existing && existing["codex_turn_id"],
-                codex_turn_id: turn["codex_turn_id"],
-                error: error
-              }
-            },
-            db: db
-          )
-        end
+               turn = decode_turn(SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn_id]))
 
-        turn
-      end)
-    end)
+               if trace_turn_update?(existing, turn, status, codex_turn_id, error) do
+                 Avcs.Trace.append_event(
+                   project,
+                   %{
+                     scope: "turn",
+                     event_name: turn_event_name(existing, turn),
+                     thread_id: turn["thread_id"],
+                     turn_id: turn_id,
+                     codex_turn_id: turn["codex_turn_id"],
+                     status: turn["status"],
+                     payload: %{
+                       from_status: existing && existing["status"],
+                       to_status: turn["status"],
+                       previous_codex_turn_id: existing && existing["codex_turn_id"],
+                       codex_turn_id: turn["codex_turn_id"],
+                       error: error
+                     }
+                   },
+                   db: db
+                 )
+               end
+
+               turn
+             end
+           end)
+         end) do
+      {:ok, {:error, _reason} = error} -> error
+      result -> result
+    end
+  end
+
+  defp do_edit_and_invalidate_after(project, db, item_id, content, status) do
+    with {:ok, content} <- normalize_edit_content(content),
+         {:ok, item} <- editable_user_item(db, item_id),
+         {:ok, turn} <- editable_turn(db, item["turn_id"]),
+         :ok <- ensure_thread_not_running(db, turn["thread_id"]),
+         :ok <- ensure_starting_user_item(db, item),
+         now = Avcs.Time.now_iso(),
+         {:ok, invalidated} <- invalidate_after_item(db, turn, item, now),
+         {:ok, updated} <- update_edited_anchor(db, turn, item, content, status, now) do
+      trace_edit_rerun(project, db, updated, invalidated, content)
+
+      Map.merge(updated, %{
+        "asset_ids" => payload_asset_ids(updated["item"]["payload"]),
+        "invalidated_item_ids" => invalidated.item_ids,
+        "invalidated_turn_ids" => invalidated.turn_ids,
+        "rollback_turn_count" => length(invalidated.turn_ids) + 1,
+        "turn_settings" => turn_settings(updated["turn"], updated["item"]["payload"])
+      })
+    end
+  end
+
+  defp normalize_edit_content(content) when is_binary(content) do
+    case String.trim(content) do
+      "" -> {:error, :empty_message}
+      trimmed -> {:ok, trimmed}
+    end
+  end
+
+  defp normalize_edit_content(_content), do: {:error, :empty_message}
+
+  defp editable_user_item(db, item_id) when is_binary(item_id) and item_id != "" do
+    db
+    |> SQLite.one!(
+      """
+      SELECT *
+      FROM items
+      WHERE id = ?
+        AND invalidated_at IS NULL
+      LIMIT 1
+      """,
+      [item_id]
+    )
+    |> decode_item()
+    |> case do
+      nil ->
+        {:error, :item_not_found}
+
+      %{"type" => "user_message", "payload" => %{"steered" => true}} ->
+        {:error, :message_edit_unsupported}
+
+      %{"type" => "user_message"} = item ->
+        {:ok, item}
+
+      _item ->
+        {:error, :message_edit_unsupported}
+    end
+  end
+
+  defp editable_user_item(_db, _item_id), do: {:error, :item_not_found}
+
+  defp editable_turn(db, turn_id) when is_binary(turn_id) and turn_id != "" do
+    db
+    |> SQLite.one!(
+      """
+      SELECT *
+      FROM turns
+      WHERE id = ?
+        AND invalidated_at IS NULL
+      LIMIT 1
+      """,
+      [turn_id]
+    )
+    |> decode_turn()
+    |> case do
+      nil -> {:error, :item_not_found}
+      %{"status" => status} when status in @running_statuses -> {:error, :message_edit_conflict}
+      turn -> {:ok, turn}
+    end
+  end
+
+  defp editable_turn(_db, _turn_id), do: {:error, :item_not_found}
+
+  defp ensure_thread_not_running(db, thread_id) do
+    count =
+      SQLite.scalar!(
+        db,
+        """
+        SELECT COUNT(*)
+        FROM turns
+        WHERE thread_id = ?
+          AND invalidated_at IS NULL
+          AND status IN (#{placeholders(@running_statuses)})
+        """,
+        [thread_id | @running_statuses]
+      )
+
+    if count == 0, do: :ok, else: {:error, :message_edit_conflict}
+  end
+
+  defp ensure_starting_user_item(db, item) do
+    earlier_count =
+      SQLite.scalar!(
+        db,
+        """
+        SELECT COUNT(*)
+        FROM items
+        WHERE thread_id = ?
+          AND turn_id = ?
+          AND type = 'user_message'
+          AND invalidated_at IS NULL
+          AND (created_at < ? OR (created_at = ? AND id < ?))
+        """,
+        [
+          item["thread_id"],
+          item["turn_id"],
+          item["created_at"],
+          item["created_at"],
+          item["id"]
+        ]
+      )
+
+    if earlier_count == 0, do: :ok, else: {:error, :message_edit_unsupported}
+  end
+
+  defp invalidate_after_item(db, turn, item, now) do
+    turn_ids = later_turn_ids(db, turn)
+    item_ids = Enum.uniq(later_item_ids(db, turn_ids) ++ later_item_ids_in_anchor_turn(db, item))
+
+    mark_turns_invalidated(db, turn_ids, item["id"], now)
+    mark_items_invalidated(db, item_ids, item["id"], now)
+    mark_linked_rows_invalidated(db, "asset_links", turn_ids, item_ids, item["id"], now)
+    mark_linked_rows_invalidated(db, "board_items", turn_ids, item_ids, item["id"], now)
+
+    {:ok, %{item_ids: item_ids, turn_ids: turn_ids}}
+  end
+
+  defp later_turn_ids(db, turn) do
+    SQLite.all!(
+      db,
+      """
+      SELECT id
+      FROM turns
+      WHERE thread_id = ?
+        AND invalidated_at IS NULL
+        AND (created_at > ? OR (created_at = ? AND id > ?))
+      ORDER BY created_at ASC, id ASC
+      """,
+      [turn["thread_id"], turn["created_at"], turn["created_at"], turn["id"]]
+    )
+    |> Enum.map(& &1["id"])
+  end
+
+  defp later_item_ids(_db, []), do: []
+
+  defp later_item_ids(db, turn_ids) do
+    SQLite.all!(
+      db,
+      """
+      SELECT id
+      FROM items
+      WHERE turn_id IN (#{placeholders(turn_ids)})
+        AND invalidated_at IS NULL
+      ORDER BY created_at ASC, id ASC
+      """,
+      turn_ids
+    )
+    |> Enum.map(& &1["id"])
+  end
+
+  defp later_item_ids_in_anchor_turn(db, item) do
+    SQLite.all!(
+      db,
+      """
+      SELECT id
+      FROM items
+      WHERE thread_id = ?
+        AND turn_id = ?
+        AND invalidated_at IS NULL
+        AND id != ?
+      ORDER BY created_at ASC, id ASC
+      """,
+      [item["thread_id"], item["turn_id"], item["id"]]
+    )
+    |> Enum.map(& &1["id"])
+  end
+
+  defp update_edited_anchor(db, turn, item, content, status, now) do
+    payload =
+      item["payload"]
+      |> Map.put("edited_at", now)
+      |> Map.put("previous_content", item["content"])
+
+    SQLite.run!(
+      db,
+      """
+      UPDATE items
+      SET content = ?,
+          payload = ?,
+          status = 'completed',
+          updated_at = ?
+      WHERE id = ?
+      """,
+      [content, Jason.encode!(payload), now, item["id"]]
+    )
+
+    SQLite.run!(
+      db,
+      """
+      UPDATE turns
+      SET status = ?,
+          user_text = ?,
+          codex_turn_id = NULL,
+          completed_at = NULL,
+          error = NULL,
+          updated_at = ?
+      WHERE id = ?
+      """,
+      [status, content, now, turn["id"]]
+    )
+
+    SQLite.run!(
+      db,
+      "UPDATE threads SET updated_at = ? WHERE id = ?",
+      [now, turn["thread_id"]]
+    )
+
+    {:ok,
+     %{
+       "item" => decode_item(SQLite.one!(db, "SELECT * FROM items WHERE id = ?", [item["id"]])),
+       "turn" => decode_turn(SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn["id"]]))
+     }}
+  end
+
+  defp mark_turns_invalidated(_db, [], _item_id, _now), do: :ok
+
+  defp mark_turns_invalidated(db, turn_ids, item_id, now) do
+    SQLite.run!(
+      db,
+      """
+      UPDATE turns
+      SET invalidated_at = ?,
+          invalidated_by_item_id = ?,
+          updated_at = ?
+      WHERE id IN (#{placeholders(turn_ids)})
+        AND invalidated_at IS NULL
+      """,
+      [now, item_id, now | turn_ids]
+    )
+  end
+
+  defp mark_items_invalidated(_db, [], _item_id, _now), do: :ok
+
+  defp mark_items_invalidated(db, item_ids, item_id, now) do
+    SQLite.run!(
+      db,
+      """
+      UPDATE items
+      SET invalidated_at = ?,
+          invalidated_by_item_id = ?,
+          updated_at = ?
+      WHERE id IN (#{placeholders(item_ids)})
+        AND invalidated_at IS NULL
+      """,
+      [now, item_id, now | item_ids]
+    )
+  end
+
+  defp mark_linked_rows_invalidated(_db, _table, [], [], _item_id, _now), do: :ok
+
+  defp mark_linked_rows_invalidated(db, table, turn_ids, item_ids, item_id, now) do
+    {conditions, params} = invalidation_conditions(turn_ids, item_ids)
+
+    SQLite.run!(
+      db,
+      """
+      UPDATE #{table}
+      SET invalidated_at = ?,
+          invalidated_by_item_id = ?
+      WHERE invalidated_at IS NULL
+        AND (#{Enum.join(conditions, " OR ")})
+      """,
+      [now, item_id | params]
+    )
+  end
+
+  defp invalidation_conditions(turn_ids, item_ids) do
+    pairs =
+      []
+      |> maybe_add_in_condition("turn_id", turn_ids)
+      |> maybe_add_in_condition("item_id", item_ids)
+      |> Enum.reverse()
+
+    {Enum.map(pairs, &elem(&1, 0)), Enum.flat_map(pairs, &elem(&1, 1))}
+  end
+
+  defp maybe_add_in_condition(conditions, _field, []), do: conditions
+
+  defp maybe_add_in_condition(conditions, field, values) do
+    [{"#{field} IN (#{placeholders(values)})", values} | conditions]
+  end
+
+  defp trace_edit_rerun(project, db, updated, invalidated, content) do
+    Avcs.Trace.append_event(
+      project,
+      %{
+        scope: "turn",
+        event_name: "message_edit_rerun",
+        thread_id: updated["turn"]["thread_id"],
+        turn_id: updated["turn"]["id"],
+        item_id: updated["item"]["id"],
+        status: updated["turn"]["status"],
+        payload: %{
+          content: content_snapshot(content),
+          invalidated_item_ids: invalidated.item_ids,
+          invalidated_turn_ids: invalidated.turn_ids
+        }
+      },
+      db: db
+    )
+  end
+
+  defp payload_asset_ids(payload) when is_map(payload) do
+    case payload["asset_ids"] || payload[:asset_ids] do
+      ids when is_list(ids) -> Enum.filter(ids, &is_binary/1)
+      _ids -> []
+    end
+  end
+
+  defp payload_asset_ids(_payload), do: []
+
+  defp turn_settings(turn, payload) do
+    %{
+      approval_policy: turn["approval_policy"] || "never",
+      data_provider: turn["data_provider"],
+      effort: turn["effort"],
+      mask_edit: payload["mask_edit"] || payload[:mask_edit],
+      model: turn["model"],
+      sandbox_mode: turn["sandbox_mode"] || "workspace-write"
+    }
   end
 
   defp do_list_item_page(_db, thread_id, page_opts)
@@ -530,6 +897,7 @@ defmodule Avcs.Turns do
         SELECT *
         FROM turns
         WHERE thread_id = ?
+          AND invalidated_at IS NULL
         ORDER BY created_at DESC, id DESC
         LIMIT ?
         """,
@@ -559,6 +927,7 @@ defmodule Avcs.Turns do
           SELECT *
           FROM turns
           WHERE thread_id = ?
+            AND invalidated_at IS NULL
             AND (created_at < ? OR (created_at = ? AND id < ?))
           ORDER BY created_at DESC, id DESC
           LIMIT ?
@@ -591,6 +960,7 @@ defmodule Avcs.Turns do
           SELECT *
           FROM turns
           WHERE thread_id = ?
+            AND invalidated_at IS NULL
             AND (created_at > ? OR (created_at = ? AND id > ?))
           ORDER BY created_at ASC, id ASC
           LIMIT ?
@@ -620,6 +990,7 @@ defmodule Avcs.Turns do
         SELECT *
         FROM turns
         WHERE thread_id = ? AND id = ?
+          AND invalidated_at IS NULL
         LIMIT 1
         """,
         [thread_id, turn_id]
@@ -636,6 +1007,7 @@ defmodule Avcs.Turns do
           SELECT *
           FROM turns
           WHERE thread_id = ?
+            AND invalidated_at IS NULL
             AND (created_at < ? OR (created_at = ? AND id < ?))
           ORDER BY created_at DESC, id DESC
           LIMIT ?
@@ -650,6 +1022,7 @@ defmodule Avcs.Turns do
           SELECT *
           FROM turns
           WHERE thread_id = ?
+            AND invalidated_at IS NULL
             AND (created_at > ? OR (created_at = ? AND id > ?))
           ORDER BY created_at ASC, id ASC
           LIMIT ?
@@ -778,6 +1151,7 @@ defmodule Avcs.Turns do
         SELECT *
         FROM turns
         WHERE thread_id = ? AND id = ? AND created_at = ?
+          AND invalidated_at IS NULL
         LIMIT 1
         """,
         [thread_id, cursor.id, cursor.created_at]
@@ -855,6 +1229,8 @@ defmodule Avcs.Turns do
       LEFT JOIN turns ON turns.id = items.turn_id
       WHERE items.thread_id = ?
         AND items.turn_id IN (#{placeholders})
+        AND items.invalidated_at IS NULL
+        AND COALESCE(turns.invalidated_at, '') = ''
       ORDER BY turns.created_at ASC, turns.id ASC, items.created_at ASC, items.id ASC
       """,
       [thread_id | turn_ids]
@@ -869,6 +1245,7 @@ defmodule Avcs.Turns do
       SELECT id
       FROM turns
       WHERE thread_id = ?
+        AND invalidated_at IS NULL
       ORDER BY created_at DESC, id DESC
       LIMIT 1
       """,
@@ -884,6 +1261,8 @@ defmodule Avcs.Turns do
       id: turn["id"]
     }
   end
+
+  defp placeholders(values), do: Enum.map_join(values, ",", fn _value -> "?" end)
 
   defp reference_payload(reference_assets, nil, nil), do: %{asset_ids: reference_assets}
 

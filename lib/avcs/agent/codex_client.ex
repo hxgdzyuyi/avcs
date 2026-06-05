@@ -118,6 +118,44 @@ defmodule Avcs.Agent.CodexClient do
     )
   end
 
+  def fork_thread(codex_thread_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      {:fork_thread, codex_thread_id, opts, timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
+  def fork_thread_on(server, codex_thread_id, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      server,
+      {:fork_thread, codex_thread_id, opts, timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
+  def rollback_thread(codex_thread_id, num_turns, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      {:rollback_thread, codex_thread_id, num_turns, timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
+  def rollback_thread_on(server, codex_thread_id, num_turns, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
+
+    call_server(
+      server,
+      {:rollback_thread, codex_thread_id, num_turns, timeout},
+      timeout + @call_timeout_buffer_ms
+    )
+  end
+
   def steer_turn_on(server, text, reference_paths, opts \\ []) do
     timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
 
@@ -209,6 +247,32 @@ defmodule Avcs.Agent.CodexClient do
       from: from,
       codex_thread_id: codex_thread_id,
       include_turns: include_turns == true,
+      on_event: fn _event -> :ok end,
+      timeout_ms: timeout_ms
+    }
+
+    {:noreply, begin_request(request, state)}
+  end
+
+  def handle_call({:fork_thread, codex_thread_id, opts, timeout_ms}, from, state) do
+    request = %{
+      kind: :fork_thread,
+      from: from,
+      codex_thread_id: codex_thread_id,
+      opts: normalize_turn_opts(opts),
+      on_event: fn _event -> :ok end,
+      timeout_ms: timeout_ms
+    }
+
+    {:noreply, begin_request(request, state)}
+  end
+
+  def handle_call({:rollback_thread, codex_thread_id, num_turns, timeout_ms}, from, state) do
+    request = %{
+      kind: :rollback_thread,
+      from: from,
+      codex_thread_id: codex_thread_id,
+      num_turns: num_turns,
       on_event: fn _event -> :ok end,
       timeout_ms: timeout_ms
     }
@@ -496,6 +560,62 @@ defmodule Avcs.Agent.CodexClient do
     %{state | active: active}
   end
 
+  defp start_request(%{kind: :fork_thread} = request, state) do
+    opts = request.opts
+
+    params =
+      compact(%{
+        threadId: request.codex_thread_id,
+        model: opts.model,
+        approvalPolicy: opts.approval_policy,
+        approvalsReviewer: opts.approvals_reviewer,
+        sandbox: opts.sandbox_mode
+      })
+
+    validate_params(:thread_fork_params, params, "thread/fork params")
+
+    {id, state} = next_request_id(state)
+
+    send_json(state.port, %{
+      method: "thread/fork",
+      id: id,
+      params: params
+    })
+
+    active = %{
+      kind: :fork_thread,
+      from: request.from,
+      request_id: id,
+      timer_ref: schedule_timeout(request.timeout_ms),
+      timer_kind: :request
+    }
+
+    %{state | active: active}
+  end
+
+  defp start_request(%{kind: :rollback_thread} = request, state) do
+    params = %{threadId: request.codex_thread_id, numTurns: request.num_turns}
+    validate_params(:thread_rollback_params, params, "thread/rollback params")
+
+    {id, state} = next_request_id(state)
+
+    send_json(state.port, %{
+      method: "thread/rollback",
+      id: id,
+      params: params
+    })
+
+    active = %{
+      kind: :rollback_thread,
+      from: request.from,
+      request_id: id,
+      timer_ref: schedule_timeout(request.timeout_ms),
+      timer_kind: :request
+    }
+
+    %{state | active: active}
+  end
+
   defp start_request(%{kind: :run_turn, codex_thread_id: thread_id} = request, state)
        when is_binary(thread_id) and thread_id != "" do
     if thread_loaded?(state, thread_id) do
@@ -548,6 +668,17 @@ defmodule Avcs.Agent.CodexClient do
          message,
          %{active: %{kind: :read_thread, request_id: id}} = state
        ) do
+    validate_notification(message)
+    finish_request({:error, error_message(error)}, state)
+  end
+
+  defp handle_response_error(
+         id,
+         error,
+         message,
+         %{active: %{kind: kind, request_id: id}} = state
+       )
+       when kind in [:fork_thread, :rollback_thread] do
     validate_notification(message)
     finish_request({:error, error_message(error)}, state)
   end
@@ -642,6 +773,42 @@ defmodule Avcs.Agent.CodexClient do
        ) do
     validate_result(:thread_read_response, message, "thread/read response")
     thread = get_in(message, ["result", "thread"]) || %{}
+    finish_request({:ok, compact_thread(thread)}, state)
+  end
+
+  defp handle_response_result(
+         id,
+         _result,
+         message,
+         %{active: %{kind: :fork_thread, request_id: id}} = state
+       ) do
+    validate_result(:thread_fork_response, message, "thread/fork response")
+    thread = get_in(message, ["result", "thread"]) || %{}
+
+    state =
+      case thread["id"] do
+        id when is_binary(id) and id != "" -> mark_thread_loaded(state, id)
+        _id -> state
+      end
+
+    finish_request({:ok, compact_thread(thread)}, state)
+  end
+
+  defp handle_response_result(
+         id,
+         _result,
+         message,
+         %{active: %{kind: :rollback_thread, request_id: id}} = state
+       ) do
+    validate_result(:thread_rollback_response, message, "thread/rollback response")
+    thread = get_in(message, ["result", "thread"]) || %{}
+
+    state =
+      case thread["id"] do
+        id when is_binary(id) and id != "" -> mark_thread_loaded(state, id)
+        _id -> state
+      end
+
     finish_request({:ok, compact_thread(thread)}, state)
   end
 

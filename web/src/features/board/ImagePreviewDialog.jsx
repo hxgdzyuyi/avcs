@@ -15,6 +15,8 @@ import { useModalDialog } from "../../components/useModalDialog.js";
 import PromptEditor from "../chat/PromptEditor.jsx";
 import { previewUrl } from "../../api.js";
 
+const defaultT = (key, _params = {}, fallback = key) => fallback;
+
 export default function ImagePreviewDialog({
   asset,
   prompt,
@@ -25,6 +27,7 @@ export default function ImagePreviewDialog({
   onReference,
   onReveal,
   onCopyPath,
+  t = defaultT,
 }) {
   const closeButtonRef = useRef(null);
   const maskCanvasRef = useRef(null);
@@ -169,8 +172,8 @@ export default function ImagePreviewDialog({
           <button
             className="icon-button ghost"
             type="button"
-            title="Close image preview"
-            aria-label="Close image preview"
+            title={t("preview.close")}
+            aria-label={t("preview.close")}
             onClick={onClose}
             ref={closeButtonRef}
           >
@@ -181,19 +184,19 @@ export default function ImagePreviewDialog({
         <div className="image-preview-actions">
           <IconButton
             className={maskMode ? "active" : ""}
-            label={maskMode ? "Close mask editor" : "Edit mask"}
+            label={maskMode ? t("preview.close_mask") : t("preview.edit_mask")}
             onClick={() => setMaskMode((open) => !open)}
             disabled={isSending}
           >
             <Brush size={16} />
           </IconButton>
-          <IconButton label={`Reference ${fileName}`} onClick={() => onReference(asset.id)}>
+          <IconButton label={t("preview.reference", { name: fileName })} onClick={() => onReference(asset.id)}>
             <Paperclip size={16} />
           </IconButton>
-          <IconButton label={`Open containing folder for ${fileName}`} onClick={() => onReveal(asset.id)}>
+          <IconButton label={t("preview.open_folder", { name: fileName })} onClick={() => onReveal(asset.id)}>
             <FolderOpen size={16} />
           </IconButton>
-          <IconButton label={`Copy path for ${fileName}`} onClick={() => onCopyPath(asset.id)}>
+          <IconButton label={t("preview.copy_path", { name: fileName })} onClick={() => onCopyPath(asset.id)}>
             <Copy size={16} />
           </IconButton>
         </div>
@@ -204,7 +207,7 @@ export default function ImagePreviewDialog({
           <div className="image-preview-mask-toolbar" onMouseDown={(event) => event.stopPropagation()}>
             <IconButton
               className={maskTool === "brush" ? "active" : ""}
-              label="Brush mask"
+              label={t("preview.brush")}
               onClick={() => setMaskTool("brush")}
               disabled={isSending}
             >
@@ -212,14 +215,14 @@ export default function ImagePreviewDialog({
             </IconButton>
             <IconButton
               className={maskTool === "erase" ? "active" : ""}
-              label="Erase mask"
+              label={t("preview.erase")}
               onClick={() => setMaskTool("erase")}
               disabled={isSending}
             >
               <Eraser size={15} />
             </IconButton>
-            <label className="image-preview-brush-size" title={`Brush size: ${brushSize}`}>
-              <span>Size</span>
+            <label className="image-preview-brush-size" title={t("preview.size_title", { size: brushSize })}>
+              <span>{t("preview.size")}</span>
               <input
                 type="range"
                 min="8"
@@ -230,10 +233,10 @@ export default function ImagePreviewDialog({
                 onChange={(event) => setBrushSize(Number(event.target.value))}
               />
             </label>
-            <IconButton label="Undo mask stroke" onClick={undoMask} disabled={isSending || !canUndo}>
+            <IconButton label={t("preview.undo_mask")} onClick={undoMask} disabled={isSending || !canUndo}>
               <Undo2 size={15} />
             </IconButton>
-            <IconButton label="Clear mask" onClick={clearMask} disabled={isSending || !maskDirty}>
+            <IconButton label={t("preview.clear_mask")} onClick={clearMask} disabled={isSending || !maskDirty}>
               <Trash2 size={15} />
             </IconButton>
           </div>
@@ -248,7 +251,7 @@ export default function ImagePreviewDialog({
             ref={maskCanvasRef}
             width={canvasWidth}
             height={canvasHeight}
-            aria-label="Image edit mask"
+            aria-label={t("preview.mask")}
             onPointerDown={startMaskStroke}
             onPointerMove={moveMaskStroke}
             onPointerUp={endMaskStroke}
@@ -263,12 +266,13 @@ export default function ImagePreviewDialog({
           onChange={onPromptChange}
           onSubmit={handleSend}
           disabled={isSending}
+          placeholderText={t("preview.prompt_placeholder", {}, "Describe the edit you want...")}
         />
         <button
           className="send-button image-preview-send"
           type="button"
-          title={isSending ? "Sending" : "Send"}
-          aria-label={isSending ? "Sending" : "Send"}
+          title={isSending ? t("preview.sending") : t("common.send")}
+          aria-label={isSending ? t("preview.sending") : t("common.send")}
           onClick={handleSend}
           disabled={sendDisabled}
         >

@@ -1540,6 +1540,13 @@
   pointer-events: auto;
 }
 
+.message-edit-actions {
+  position: static;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
 .message-action {
   display: inline-flex;
   align-items: center;
@@ -3540,6 +3547,10 @@
   background: $panel;
 }
 
+.board-object-menu button.danger {
+  color: $danger;
+}
+
 .board-object-menu button:disabled {
   cursor: not-allowed;
   opacity: 0.46;
@@ -3547,6 +3558,10 @@
 
 .board-object-menu svg {
   color: $muted;
+}
+
+.board-object-menu button.danger svg {
+  color: $danger;
 }
 
 .board-floating-tools {

@@ -188,6 +188,23 @@ defmodule Avcs.Agent.CodexClientTest do
     assert File.read!(requests_path) =~ ~s("includeTurns":true)
   end
 
+  test "fork_thread and rollback_thread use app-server thread history APIs", %{
+    requests_path: requests_path
+  } do
+    assert {:ok, %{"id" => "thread-forked"}} = Avcs.Agent.CodexClient.fork_thread("thread-1")
+
+    assert {:ok, %{"id" => "thread-forked"}} =
+             Avcs.Agent.CodexClient.rollback_thread("thread-forked", 2)
+
+    requests = read_requests!(requests_path)
+    fork = Enum.find(requests, &(&1["method"] == "thread/fork"))
+    rollback = Enum.find(requests, &(&1["method"] == "thread/rollback"))
+
+    assert get_in(fork, ["params", "threadId"]) == "thread-1"
+    assert get_in(rollback, ["params", "threadId"]) == "thread-forked"
+    assert get_in(rollback, ["params", "numTurns"]) == 2
+  end
+
   test "run_turn sends rendered Avcs imagegen runtime instructions", %{
     requests_path: requests_path
   } do
@@ -550,6 +567,14 @@ defmodule Avcs.Agent.CodexClientTest do
         *\\"method\\":\\"thread/resume\\"*)
           event_log thread-resume
           printf '%s\\n' "{\\"id\\":$id,\\"result\\":{\\"thread\\":{\\"id\\":\\"thread-1\\",\\"name\\":\\"Fake Thread\\"}}}"
+          ;;
+        *\\"method\\":\\"thread/fork\\"*)
+          event_log thread-fork
+          printf '%s\\n' "{\\"id\\":$id,\\"result\\":{\\"thread\\":{\\"id\\":\\"thread-forked\\",\\"name\\":\\"Fake Thread Forked\\"}}}"
+          ;;
+        *\\"method\\":\\"thread/rollback\\"*)
+          event_log thread-rollback
+          printf '%s\\n' "{\\"id\\":$id,\\"result\\":{\\"thread\\":{\\"id\\":\\"thread-forked\\",\\"name\\":\\"Fake Thread Rolled Back\\"}}}"
           ;;
         *\\"method\\":\\"turn/start\\"*)
           event_log turn-start

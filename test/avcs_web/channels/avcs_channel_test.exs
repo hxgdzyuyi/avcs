@@ -24,6 +24,32 @@ defmodule AvcsWeb.AvcsChannelTest do
     end
   end
 
+  defmodule EditRerunRunner do
+    def rerun_from_item(project, item_id, content) do
+      with {:ok, result} <-
+             Avcs.Turns.edit_and_invalidate_after(project, item_id, content, status: "queued") do
+        thread_id = result["turn"]["thread_id"]
+
+        Avcs.Events.broadcast("item:updated", %{
+          thread_id: thread_id,
+          turn_id: result["turn"]["id"],
+          item: result["item"]
+        })
+
+        {:ok, items} = Avcs.Turns.list_items(project, thread_id)
+        Avcs.Events.broadcast("thread:items", %{thread_id: thread_id, items: items})
+
+        Avcs.Events.broadcast("turn:started", %{
+          thread_id: thread_id,
+          turn_id: result["turn"]["id"],
+          turn: result["turn"]
+        })
+
+        {:ok, result}
+      end
+    end
+  end
+
   defmodule ActiveSteerClient do
     def active_turn(_project, _thread_id) do
       {:ok, %{turn_id: Application.fetch_env!(:avcs, :channel_active_turn_id), worker: self()}}
@@ -179,7 +205,9 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert settings["agent.default_approval_policy"] == "never"
     assert settings["agent.default_model"] == "gpt-5.5"
     assert settings["agent.default_effort"] == "medium"
+    assert settings["ui.locale"] == "en"
     assert Enum.any?(items, &(&1.key == "projects.default_root"))
+    assert Enum.any?(items, &(&1.key == "ui.locale"))
 
     update_ref =
       push(socket, "site_settings:update", %{
@@ -187,7 +215,8 @@ defmodule AvcsWeb.AvcsChannelTest do
           "agent.default_model" => "gpt-5",
           "image.default_ratio" => "9:16",
           "image.default_count" => 2,
-          "image.transparent_background" => true
+          "image.transparent_background" => true,
+          "ui.locale" => "zh-hans"
         }
       })
 
@@ -200,8 +229,10 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert updated_settings["image.default_ratio"] == "9:16"
     assert updated_settings["image.default_count"] == 2
     assert updated_settings["image.transparent_background"] == true
+    assert updated_settings["ui.locale"] == "zh-hans"
     assert_push "site_settings:updated", %{settings: pushed_settings}
     assert pushed_settings["image.default_count"] == 2
+    assert pushed_settings["ui.locale"] == "zh-hans"
 
     invalid_ref =
       push(socket, "site_settings:update", %{
@@ -211,6 +242,16 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert_reply invalid_ref, :ok, %{
       success: false,
       error: %{code: "invalid_site_setting", details: %{key: "agent.default_effort"}}
+    }
+
+    invalid_locale_ref =
+      push(socket, "site_settings:update", %{
+        "settings" => %{"ui.locale" => "fr"}
+      })
+
+    assert_reply invalid_locale_ref, :ok, %{
+      success: false,
+      error: %{code: "invalid_site_setting", details: %{key: "ui.locale"}}
     }
 
     unknown_ref =
@@ -223,7 +264,8 @@ defmodule AvcsWeb.AvcsChannelTest do
       error: %{code: "unknown_site_setting", details: %{key: "unknown.key"}}
     }
 
-    reset_ref = push(socket, "site_settings:reset", %{"keys" => ["image.default_count"]})
+    reset_ref =
+      push(socket, "site_settings:reset", %{"keys" => ["image.default_count", "ui.locale"]})
 
     assert_reply reset_ref, :ok, %{
       success: true,
@@ -231,6 +273,7 @@ defmodule AvcsWeb.AvcsChannelTest do
     }
 
     assert reset_settings["image.default_count"] == 1
+    assert reset_settings["ui.locale"] == "en"
   end
 
   test "models list does not block later websocket requests", %{socket: socket} do
@@ -436,6 +479,32 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert selected["current_thread_id"] == nil
   end
 
+  test "renames the current project through websocket events", %{
+    project: project,
+    socket: socket
+  } do
+    rename_ref = push(socket, "project:rename", %{"id" => project["id"], "name" => "Renamed"})
+
+    assert_reply rename_ref, :ok, %{success: true, data: renamed}
+    assert renamed["id"] == project["id"]
+    assert renamed["name"] == "Renamed"
+
+    assert_push "project:updated", %{project: pushed_project}
+    assert pushed_project["id"] == project["id"]
+    assert pushed_project["name"] == "Renamed"
+
+    assert_push "projects:updated", %{items: projects}
+    assert Enum.any?(projects, &(&1["id"] == project["id"] and &1["name"] == "Renamed"))
+
+    invalid_ref =
+      push(socket, "project:rename", %{"id" => project["id"], "name" => "bad/name"})
+
+    assert_reply invalid_ref, :ok, %{
+      success: false,
+      error: %{code: "invalid_project_name"}
+    }
+  end
+
   test "archives and deletes project references through websocket events", %{
     project: project,
     socket: socket
@@ -565,6 +634,52 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert item["payload"]["mask_edit"]["mode"] == "visual_reference"
     assert item["payload"]["mask_edit"]["base_asset_id"] == base_asset["id"]
     assert item["payload"]["mask_edit"]["mask_asset_id"] == mask_asset["id"]
+  end
+
+  test "message:edit_rerun invalidates later path and broadcasts refreshed items", %{
+    project: project,
+    socket: socket
+  } do
+    Application.put_env(:avcs, :agent_runner, EditRerunRunner)
+
+    {:ok, thread} = Avcs.Threads.create_thread(project, "Edit from history")
+
+    {:ok, first} =
+      Avcs.Turns.create_user_turn(project, thread["id"], "Original prompt", [])
+
+    {:ok, _turn} = Avcs.Turns.complete_turn(project, first["turn"]["id"], "codex-turn-1")
+    set_turn_time(project, first["turn"]["id"], 1)
+
+    {:ok, second} =
+      Avcs.Turns.create_user_turn(project, thread["id"], "Later prompt", [])
+
+    {:ok, _turn} = Avcs.Turns.complete_turn(project, second["turn"]["id"], "codex-turn-2")
+    set_turn_time(project, second["turn"]["id"], 2)
+
+    ref =
+      push(socket, "message:edit_rerun", %{
+        "item_id" => first["item"]["id"],
+        "content" => "Revised prompt"
+      })
+
+    assert_reply ref, :ok, %{success: true, data: data}
+    assert data["item"]["content"] == "Revised prompt"
+    assert data["turn"]["id"] == first["turn"]["id"]
+    assert data["turn"]["status"] == "queued"
+    assert data["invalidated_turn_ids"] == [second["turn"]["id"]]
+    assert second["item"]["id"] in data["invalidated_item_ids"]
+
+    assert_push "item:updated", %{item: pushed_item}
+    assert pushed_item["id"] == first["item"]["id"]
+    assert pushed_item["content"] == "Revised prompt"
+
+    assert_push "thread:items", %{thread_id: pushed_thread_id, items: pushed_items}
+    assert pushed_thread_id == thread["id"]
+    assert Enum.map(pushed_items, & &1["content"]) == ["Revised prompt"]
+
+    assert_push "turn:started", %{turn_id: pushed_turn_id, turn: pushed_turn}
+    assert pushed_turn_id == first["turn"]["id"]
+    assert pushed_turn["status"] == "queued"
   end
 
   test "thread:items:page returns turn windows and request ids", %{

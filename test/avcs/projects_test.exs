@@ -130,6 +130,40 @@ defmodule Avcs.ProjectsTest do
              Avcs.Projects.reorder_projects([first["id"], second["id"]])
   end
 
+  test "renaming a project updates only the global display name and survives reopen", %{
+    projects_dir: projects_dir
+  } do
+    {:ok, project} = Avcs.Projects.open_project(Path.join(projects_dir, "original-folder"))
+    {:ok, projects_before} = Avcs.Projects.list_projects()
+    before_rename = project_by_id(projects_before, project["id"])
+
+    assert {:ok, renamed} = Avcs.Projects.rename_project(project["id"], "  Renamed Project  ")
+    assert renamed["name"] == "Renamed Project"
+    assert renamed["folder_path"] == before_rename["folder_path"]
+    assert renamed["project_db_path"] == before_rename["project_db_path"]
+    assert renamed["sidebar_order"] == before_rename["sidebar_order"]
+    assert renamed["last_opened_at"] == before_rename["last_opened_at"]
+    assert Avcs.Projects.current_project()["name"] == "Renamed Project"
+
+    assert {:ok, reopened} = Avcs.Projects.open_project(project["folder_path"])
+    assert reopened["name"] == "Renamed Project"
+
+    assert {:ok, projects_after} = Avcs.Projects.list_projects()
+    assert project_by_id(projects_after, project["id"])["name"] == "Renamed Project"
+  end
+
+  test "project rename rejects invalid names and missing projects", %{projects_dir: projects_dir} do
+    {:ok, project} = Avcs.Projects.open_project(Path.join(projects_dir, "rename-invalid"))
+
+    for invalid_name <- ["", "  ", ".", "..", "bad/name", "bad\\name", nil] do
+      assert {:error, :invalid_project_name} =
+               Avcs.Projects.rename_project(project["id"], invalid_name)
+    end
+
+    assert {:error, :project_not_found} =
+             Avcs.Projects.rename_project(Ecto.UUID.generate(), "Missing Project")
+  end
+
   test "opening and selecting a project allows an empty thread list", %{
     projects_dir: projects_dir
   } do
@@ -147,19 +181,22 @@ defmodule Avcs.ProjectsTest do
   } do
     assert {:ok, "gpt-5.5"} = Avcs.SiteSettings.get_setting("agent.default_model")
     assert {:ok, "medium"} = Avcs.SiteSettings.get_setting("agent.default_effort")
+    assert {:ok, "en"} = Avcs.SiteSettings.get_setting("ui.locale")
 
     assert {:ok, data} =
              Avcs.SiteSettings.update_settings(%{
                "image.default_ratio" => "16:9",
                "image.default_count" => 3,
                "projects.default_root" => "~/Desktop/Avcs",
-               "assets.scan_on_open" => true
+               "assets.scan_on_open" => true,
+               "ui.locale" => "zh-hans"
              })
 
     assert data.settings["image.default_ratio"] == "16:9"
     assert data.settings["image.default_count"] == 3
     assert data.settings["projects.default_root"] == Path.expand("~/Desktop/Avcs")
     assert data.settings["assets.scan_on_open"] == true
+    assert data.settings["ui.locale"] == "zh-hans"
 
     assert item = Enum.find(data.items, &(&1.key == "image.default_ratio"))
     assert item.is_default == false
@@ -173,8 +210,14 @@ defmodule Avcs.ProjectsTest do
     assert {:error, {:invalid_site_setting, "image.default_count"}} =
              Avcs.SiteSettings.update_settings(%{"image.default_count" => 5})
 
+    assert {:error, {:invalid_site_setting, "ui.locale"}} =
+             Avcs.SiteSettings.update_settings(%{"ui.locale" => "fr"})
+
     assert {:ok, reset} = Avcs.SiteSettings.reset_setting("image.default_ratio")
     assert reset.settings["image.default_ratio"] == "auto"
+
+    assert {:ok, reset_locale} = Avcs.SiteSettings.reset_setting("ui.locale")
+    assert reset_locale.settings["ui.locale"] == "en"
 
     SQLite.with_db!(global_db_path, fn db ->
       refute SQLite.one!(db, "SELECT * FROM app_settings WHERE key = ?", [
@@ -215,7 +258,7 @@ defmodule Avcs.ProjectsTest do
     assert info.file_mtime
     assert info.sqlite_info.page_size > 0
     assert info.sqlite_info.journal_mode in ["wal", "delete", "memory", "off"]
-    assert info.sqlite_info.schema_version == "4"
+    assert info.sqlite_info.schema_version == "5"
 
     assert %{rows: rows} = Enum.find(info.table_rows, &(&1.name == "threads"))
     assert rows >= 1

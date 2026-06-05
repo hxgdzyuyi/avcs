@@ -35,8 +35,10 @@ codex app-server
 7. 当前 thread 已有 active turn 且用户继续输入时，通过 `turn/steer` 把追加输入发送到 active turn，不创建新的 Avcs turn。
 8. 用户主动停止时，通过 `turn/interrupt` 发送 `threadId` 和 `turnId`；如果 Codex turn id 尚未返回，先记录 pending interrupt，拿到 id 后立即发送。
 9. queued turn 尚未分配 app-server worker 时，直接取消队列并把本地 turn 标记为 `interrupted`。
-10. 持续读取 `thread/*`、`turn/*`、`item/*`、工具进度和错误通知。
-11. 将 Codex 输出转换为 Avcs 自己的 turn/item/asset 记录。
+10. 用户编辑历史起始消息并重跑时，如本地 thread 已有 `codex_thread_id`，优先调用 `thread/fork` 创建新 Codex thread，再对新 thread 调用 `thread/rollback` 回到锚点前的 Codex 历史。
+11. `thread/rollback` 的 `numTurns` 由本地有效 turn 路径计算，包含被编辑的锚点 turn，保证后续 `turn/start` 使用编辑后的文本重新执行。
+12. 持续读取 `thread/*`、`turn/*`、`item/*`、工具进度和错误通知。
+13. 将 Codex 输出转换为 Avcs 自己的 turn/item/asset 记录。
 
 ## 4. 行为约束
 
@@ -48,6 +50,8 @@ codex app-server
 6. Avcs 通过系统提示词限制图片生成风格、输出路径、命名规则和结果回传格式，要求 Agent 将生成图片保存到或回传到当前项目 `output/` 目录可捕获的位置。
 7. 当本轮包含 `mask_edit` 时，Avcs 传入原图和 mask 图两条引用，并在发送给 Codex 的文本中附加视觉参考指令：mask 白色或已标记区域表示需要编辑，黑色或未标记区域表示尽量保持不变。
 8. `mask_edit` 不等同正式图片编辑 API 的 mask 参数；Agent 只能按视觉参考能力执行。
+9. Codex `thread/rollback` 只影响 Codex 会话历史，不撤销 Avcs 项目文件夹中的 `work/`、`output/` 或 SQLite 记录；本地旧路径由 Avcs 自己用 invalidation 字段隐藏。
+10. 如果 `thread/fork` 或 `thread/rollback` 不可用，Avcs 可降级清空本地 `codex_thread_id` 并新开 Codex thread，但必须记录 trace，且 Agent 只能获得编辑后的当前 turn 上下文。
 
 ## 5. 事件映射
 
@@ -59,6 +63,7 @@ Codex app-server 输出需要映射到 Avcs：
 4. 工具进度映射到聊天区工具状态行。
 5. 错误通知映射到当前 turn 的 error item 和前端 error 事件。
 6. `mask_edit` 元信息写入本地 user message payload，用于追溯本轮原图与 mask 引用关系。
+7. 历史编辑重跑时，本地会先广播更新后的用户 item 和刷新后的有效 item 列表，再沿用普通 `turn/start` 生命周期映射新输出。
 
 ## 6. 兼容性
 
@@ -91,6 +96,7 @@ Schema 只用于 Elixir 后端开发期和测试期协议校验，不暴露给 R
 5. `turn/start` 失败。
 6. Agent 运行中断。
 7. 工具调用失败。
+8. 历史编辑重跑中的 `thread/fork` 或 `thread/rollback` 失败。
 
 错误应写入当前 turn/item，并通过 WebSocket 推送给前端。
 
@@ -106,3 +112,4 @@ Schema 只用于 Elixir 后端开发期和测试期协议校验，不暴露给 R
 6. 用户停止当前 turn 时，后端能通过 `turn/interrupt` 或 queued cancel 把本地 turn 收敛为 `interrupted`。
 7. Agent 输出能写回项目 SQLite 的 turn/item。
 8. Avcs 不在内部实现独立大模型服务或自定义工具协议。
+9. 历史消息编辑重跑时，后端能使用 `thread/fork` 和 `thread/rollback` 准备 Codex 历史，或在不可用时降级为新 Codex thread 并记录 trace。

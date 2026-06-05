@@ -102,6 +102,10 @@ Turn 容器需要表达：
 4. 同一 turn 的图片结果紧跟该 turn 展示，不能只出现在画板。
 5. 失败 turn 保留用户消息，并在 turn 内显示错误来源和可恢复建议。
 6. 正在运行的 turn 显示流式内容和工具状态；完成后以落库 item 为准重建 UI。
+7. 非 `steered` 的起始用户消息可进入编辑态；保存动作表现为保存并从该消息重新运行，而不是单纯改文本。
+8. 如果目标消息之后存在有效内容，保存前必须用项目内 ConfirmDialog 确认，说明后续消息、工具结果和生成画板对象会退出当前路径。
+9. Agent 运行中、目标消息已失效、目标消息是 steered 追加输入或当前无项目连接时，用户消息编辑入口禁用。
+10. 保存失败时保留编辑态和草稿文本，通过现有 notice/error 区展示后端错误。
 
 ## 6. Item 映射
 
@@ -281,6 +285,7 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 3. Item：`id`、`thread_id`、`turn_id`、`codex_item_id`、`type`、`role`、`content`、`payload`、`status`、`created_at`、`updated_at`。
 4. Asset link：`asset_id`、`thread_id`、`turn_id`、`item_id`、`source`。
 5. Runtime state：当前运行的 `thread_id`、`turn_id`、流式文本、工具状态和错误。
+6. 历史编辑路径状态：`turns`、`items`、`asset_links` 和 `board_items` 的 `invalidated_at`、`invalidated_by_item_id`；默认查询和 UI 只展示未失效路径。
 
 推荐 WebSocket 请求：
 
@@ -291,7 +296,8 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 5. `models:list`：读取 Codex `model/list` 返回的可用模型（需新增）。
 6. `thread:settings:update`：更新当前 thread 的默认 `model` / `effort` / `approval_policy` / `sandbox_mode`（需新增）。
 7. `message:send` 扩展：在文本与 `asset_ids` 外，允许携带本次 turn 的 `model` / `effort` / `approval_policy` / `sandbox_mode` 覆盖值（需新增字段）。
-8. `turn:stop`：停止当前 thread 的 active turn。
+8. `message:edit_rerun`：提交历史起始用户消息的新文本，并从该点重跑。
+9. `turn:stop`：停止当前 thread 的 active turn。
 
 审批相关请求（`approval:respond` 等）属于交互审批能力，见 `agent/002-交互审批.md`。
 
@@ -316,6 +322,7 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 1. **turn 分组（验收 #2）**：MVP 不新增 `thread:turns:list`，后端 `thread:items:list` 返回扁平 item，前端用 `turn_id` 客户端分组渲染 turn 容器。
 2. **工具状态持久化（验收 #5、§7.3）**：runner 在 `item_started` / `item_completed` 时将工具调用落库为 `tool_call` / `tool_result` item，并广播 `item:created` / `item:updated`；前端弃用瞬态 `tools` 数组，工具状态从持久 item 渲染，刷新后仍可见结果摘要。
 3. **thread 归属过滤（验收 #4、#9）**：后端事件已携带 `thread_id`，过滤在前端完成 —— `assistant:delta`、`tool:updated`、`item:created`、`item:updated` 的处理必须丢弃 `thread_id !== currentThreadId` 的事件；切换 thread 时清理不属于当前 thread 的临时 streaming UI。
+4. **历史编辑重跑**：`message:edit_rerun` 成功后前端用响应里的 `item` 更新用户气泡，并用 `thread:items` 广播刷新当前有效消息窗口，避免分页 cursor 继续指向失效 turn。
 
 ## 11. 状态与错误
 
@@ -331,7 +338,8 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 8. WebSocket 断开：保留最近一次消息列表，禁用写入操作。
 9. 资产预览失败：资产行显示缺失或不可读取状态。
 10. 用户主动停止：turn 显示 stopped/interrupted 中性色状态，不显示为普通失败。
-10. 切换 thread：清理不属于当前 thread 的临时 streaming UI。
+11. 切换 thread：清理不属于当前 thread 的临时 streaming UI。
+12. 历史编辑重跑失败：保留用户消息编辑草稿，不退出编辑态。
 
 错误来源必须明确标识为 Agent、文件 API、WebSocket、预览读取或项目数据。
 
@@ -407,3 +415,4 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 13. Composer 底部只保留一个设置入口和紧凑摘要；摘要不出现 `Default` / `default` 占位词，有具体模型时显示具体模型名。
 14. Composer 调色盘入口支持本轮选择图片比例、图片数量和透明背景；发送时只拼接到本次 prompt，发送成功后恢复默认，不新增 WebSocket 字段。
 15. 用户主动 Stop 后 turn 状态保持为 `interrupted`，刷新后不显示红色错误块。
+16. 用户编辑历史起始消息并确认保存后，旧后续路径从消息列表和当前 Output 画板退出，新的 Agent run 从编辑后的用户消息下方继续。

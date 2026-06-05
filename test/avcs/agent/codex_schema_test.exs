@@ -31,6 +31,19 @@ defmodule Avcs.Agent.CodexSchemaTest do
              })
 
     assert :ok =
+             Avcs.Agent.CodexSchema.validate(:thread_fork_params, %{
+               threadId: "thread-1",
+               approvalPolicy: "never",
+               sandbox: "workspace-write"
+             })
+
+    assert :ok =
+             Avcs.Agent.CodexSchema.validate(:thread_rollback_params, %{
+               threadId: "thread-1",
+               numTurns: 2
+             })
+
+    assert :ok =
              Avcs.Agent.CodexSchema.validate(:turn_start_params, %{
                threadId: "thread-1",
                input: [
@@ -62,6 +75,22 @@ defmodule Avcs.Agent.CodexSchemaTest do
 
     assert :ok =
              Avcs.Agent.CodexSchema.validate(:thread_read_response, %{
+               "thread" => thread_fixture()
+             })
+
+    assert :ok =
+             Avcs.Agent.CodexSchema.validate(:thread_fork_response, %{
+               "thread" => thread_fixture(),
+               "approvalPolicy" => "never",
+               "approvalsReviewer" => "user",
+               "cwd" => File.cwd!(),
+               "model" => "gpt-5.5",
+               "modelProvider" => "openai",
+               "sandbox" => %{type: "workspaceWrite", writableRoots: [File.cwd!()]}
+             })
+
+    assert :ok =
+             Avcs.Agent.CodexSchema.validate(:thread_rollback_response, %{
                "thread" => thread_fixture()
              })
 

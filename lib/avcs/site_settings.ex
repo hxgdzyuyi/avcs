@@ -18,7 +18,8 @@ defmodule Avcs.SiteSettings do
     "image.transparent_background",
     "projects.default_root",
     "projects.restore_last_opened",
-    "assets.scan_on_open"
+    "assets.scan_on_open",
+    "ui.locale"
   ]
 
   @defaults %{
@@ -31,13 +32,15 @@ defmodule Avcs.SiteSettings do
     "image.transparent_background" => false,
     "projects.default_root" => "~/Documents/Avcs",
     "projects.restore_last_opened" => true,
-    "assets.scan_on_open" => false
+    "assets.scan_on_open" => false,
+    "ui.locale" => "en"
   }
 
   @valid_efforts ~w(none minimal low medium high xhigh)
   @valid_approval_policies ~w(never untrusted on-failure on-request)
   @valid_sandbox_modes ~w(read-only workspace-write danger-full-access)
   @valid_image_ratios ~w(auto 1:1 4:3 3:4 16:9 9:16)
+  @valid_locales ~w(en zh-hans)
 
   def keys, do: @setting_order
   def defaults, do: @defaults
@@ -344,6 +347,10 @@ defmodule Avcs.SiteSettings do
     else
       {:error, {:invalid_site_setting, key}}
     end
+  end
+
+  defp normalize_setting("ui.locale" = key, value) do
+    normalize_member(key, value, @valid_locales)
   end
 
   defp normalize_member(key, value, valid_values) do

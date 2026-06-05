@@ -5,6 +5,11 @@ defmodule Avcs.Assets do
 
   @image_extensions ~w(.png .jpg .jpeg .gif .webp)
   @asset_delete_command "rm"
+  @board_initial_x 72.0
+  @board_initial_y 72.0
+  @board_same_turn_gap 24.0
+  @board_new_group_gap 72.0
+  @board_max_group_width 1280.0
 
   def list_assets(project) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
@@ -496,7 +501,7 @@ defmodule Avcs.Assets do
       SQLite.one!(
         db,
         """
-        SELECT id FROM asset_links
+        SELECT * FROM asset_links
         WHERE asset_id = ? AND COALESCE(thread_id, '') = COALESCE(?, '')
           AND COALESCE(turn_id, '') = COALESCE(?, '')
           AND COALESCE(item_id, '') = COALESCE(?, '')
@@ -514,6 +519,19 @@ defmodule Avcs.Assets do
         """,
         [Ecto.UUID.generate(), asset_id, thread_id, turn_id, item_id, source, now]
       )
+    else
+      if existing["invalidated_at"] do
+        SQLite.run!(
+          db,
+          """
+          UPDATE asset_links
+          SET invalidated_at = NULL,
+              invalidated_by_item_id = NULL
+          WHERE id = ?
+          """,
+          [existing["id"]]
+        )
+      end
     end
   end
 
@@ -525,26 +543,17 @@ defmodule Avcs.Assets do
 
   defp ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now) do
     existing =
-      SQLite.one!(db, "SELECT id FROM board_items WHERE asset_id = ? LIMIT 1", [asset["id"]])
+      SQLite.one!(db, "SELECT * FROM board_items WHERE asset_id = ? LIMIT 1", [asset["id"]])
 
     if is_nil(existing) do
-      count =
-        SQLite.scalar!(
-          db,
-          """
-          SELECT COUNT(*) AS count
-          FROM board_items
-          JOIN assets ON assets.id = board_items.asset_id
-          WHERE assets.relative_path LIKE 'output/%'
-          """
-        ) || 0
-
       width = numeric_or_default(asset["width"], 320)
       height = numeric_or_default(asset["height"], 240)
       display_width = width |> max(180) |> min(360)
 
       display_height =
         if width > 0, do: display_width * height / width, else: 240
+
+      placement = new_board_item_placement(db, turn_id, display_width)
 
       SQLite.run!(
         db,
@@ -561,21 +570,150 @@ defmodule Avcs.Assets do
           thread_id,
           turn_id,
           item_id,
-          40 + rem(count * 44, 520),
-          40 + rem(count * 32, 360),
+          placement.x,
+          placement.y,
           display_width,
           display_height,
-          count + 1,
+          placement.z_index,
           source,
           now,
           now
         ]
       )
+    else
+      if existing["invalidated_at"] do
+        SQLite.run!(
+          db,
+          """
+          UPDATE board_items
+          SET thread_id = ?,
+              turn_id = ?,
+              item_id = ?,
+              source = ?,
+              invalidated_at = NULL,
+              invalidated_by_item_id = NULL,
+              updated_at = ?
+          WHERE id = ?
+          """,
+          [thread_id, turn_id, item_id, source, now, existing["id"]]
+        )
+      end
     end
   end
 
   defp output_asset?(%{"relative_path" => "output/" <> _rest}), do: true
   defp output_asset?(_asset), do: false
+
+  defp new_board_item_placement(db, turn_id, display_width) do
+    items = active_output_board_items(db)
+    same_turn = if present_id?(turn_id), do: same_turn_items(items, turn_id), else: []
+    z_index = next_board_z_index(items)
+
+    {x, y} =
+      cond do
+        items == [] ->
+          {@board_initial_x, @board_initial_y}
+
+        same_turn != [] ->
+          same_turn_position(same_turn, display_width)
+
+        true ->
+          new_group_position(items)
+      end
+
+    %{x: x, y: y, z_index: z_index}
+  end
+
+  defp active_output_board_items(db) do
+    SQLite.all!(
+      db,
+      """
+      SELECT board_items.id,
+             board_items.rowid AS rowid,
+             board_items.turn_id,
+             board_items.x,
+             board_items.y,
+             board_items.display_width,
+             board_items.display_height,
+             board_items.z_index,
+             board_items.created_at
+      FROM board_items
+      JOIN assets ON assets.id = board_items.asset_id
+      WHERE assets.relative_path LIKE 'output/%'
+        AND board_items.invalidated_at IS NULL
+      ORDER BY board_items.created_at ASC, board_items.rowid ASC
+      """
+    )
+  end
+
+  defp same_turn_items(items, turn_id), do: Enum.filter(items, &(&1["turn_id"] == turn_id))
+
+  defp same_turn_position(items, display_width) do
+    last_item = List.last(items)
+    bounds = board_item_bounds(items)
+
+    candidate_x =
+      board_number(last_item, "x") + board_number(last_item, "display_width") +
+        @board_same_turn_gap
+
+    candidate_y = board_number(last_item, "y")
+
+    if candidate_x + display_width - bounds.x > @board_max_group_width do
+      {bounds.x, bounds.y + bounds.height + @board_same_turn_gap}
+    else
+      {candidate_x, candidate_y}
+    end
+  end
+
+  defp new_group_position(items) do
+    latest = List.last(items)
+
+    latest_group =
+      if present_id?(latest["turn_id"]) do
+        same_turn_items(items, latest["turn_id"])
+      else
+        [latest]
+      end
+
+    bounds = board_item_bounds(latest_group)
+    {bounds.x, bounds.y + bounds.height + @board_new_group_gap}
+  end
+
+  defp next_board_z_index(items) do
+    items
+    |> Enum.map(&board_integer(&1, "z_index"))
+    |> Enum.max(fn -> 0 end)
+    |> then(&(&1 + 1))
+  end
+
+  defp board_item_bounds(items) do
+    left = items |> Enum.map(&board_number(&1, "x")) |> Enum.min()
+    top = items |> Enum.map(&board_number(&1, "y")) |> Enum.min()
+
+    right =
+      items
+      |> Enum.map(&(board_number(&1, "x") + board_number(&1, "display_width")))
+      |> Enum.max()
+
+    bottom =
+      items
+      |> Enum.map(&(board_number(&1, "y") + board_number(&1, "display_height")))
+      |> Enum.max()
+
+    %{x: left, y: top, width: max(1.0, right - left), height: max(1.0, bottom - top)}
+  end
+
+  defp board_number(row, key), do: numeric_or_default(row[key], 0) * 1.0
+
+  defp board_integer(row, key) do
+    case row[key] do
+      value when is_integer(value) -> value
+      value when is_number(value) -> trunc(value)
+      _value -> 0
+    end
+  end
+
+  defp present_id?(value), do: is_binary(value) and String.trim(value) != ""
 
   defp dimensions(path) do
     case File.read(path) do

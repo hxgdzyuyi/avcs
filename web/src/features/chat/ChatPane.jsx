@@ -66,6 +66,7 @@ const DATA_PROVIDERS = [
     icon: steamProviderIcon,
   },
 ];
+const defaultT = (key, _params = {}, fallback = key) => fallback;
 
 export default function ChatPane({
   items,
@@ -108,6 +109,7 @@ export default function ChatPane({
   onLoadEarlier,
   onReturnToLatest,
   onBottomStateChange,
+  t = defaultT,
 }) {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [imagePanelOpen, setImagePanelOpen] = useState(false);
@@ -121,8 +123,8 @@ export default function ChatPane({
     .filter(Boolean);
   const turns = groupTurns(items, activeRun, streamingText);
   const threadTitle = isDraftThread
-    ? "新会话"
-    : currentThread?.title || "No thread";
+    ? t("chat.thread_new")
+    : currentThread?.title || t("chat.thread_none");
   const threadStatus = statusForThread(
     turns,
     agentRunning,
@@ -143,19 +145,20 @@ export default function ChatPane({
     composerMode === "disabled" ||
     composerMode === "stopping" ||
     (hasPendingUploads && composerMode !== "stop");
-  const sendTitle = composerActionTitle(composerMode, hasPendingUploads);
+  const sendTitle = composerActionTitle(composerMode, hasPendingUploads, t);
   const settingsSummary = composerSettingsSummary(
     composerSettings,
     currentThread,
     modelOptions,
     siteSettings,
+    t,
   );
   const imageSettingsActive = imageSettingsChanged(imageSettings);
-  const imageSettingsLabel = imageSettingsSummary(imageSettings);
+  const imageSettingsLabel = imageSettingsSummary(imageSettings, t);
   const dataProviderActive = Boolean(selectedDataProvider?.loaded);
   const dataProviderLabel = dataProviderActive
-    ? `Data provider: ${selectedDataProvider.name} loaded`
-    : "Data provider";
+    ? t("chat.data_provider_loaded", { name: selectedDataProvider.name })
+    : t("chat.data_provider");
   const canPageMessages =
     projectOpen &&
     connectionState === "online" &&
@@ -166,8 +169,8 @@ export default function ChatPane({
     (pagination.pendingNewCount > 0 || pagination.hasLoadedEarlier);
   const latestButtonLabel =
     pagination.pendingNewCount > 0
-      ? `${pagination.pendingNewCount} new turns`
-      : "Back to latest";
+      ? t("chat.new_turns", { count: pagination.pendingNewCount })
+      : t("chat.back_to_latest");
 
   useEffect(() => {
     if (!settingsDialogOpen) return undefined;
@@ -277,12 +280,16 @@ export default function ChatPane({
       <div className="pane-header thread-bar">
         <div className="thread-title">
           <h2 title={threadTitle}>{threadTitle}</h2>
-          <span className={`agent-state ${threadStatus}`}>{threadStatus}</span>
+          <span className={`agent-state ${threadStatus}`}>
+            {t(`status.${threadStatus}`, {}, threadStatus)}
+          </span>
         </div>
         <div className="toolbar">
           <IconButton
             label={
-              threadRepairing ? "Repairing thread" : "Repair thread from Codex"
+              threadRepairing
+                ? t("chat.repairing_thread")
+                : t("chat.repair_thread")
             }
             onClick={onRepairThread}
             disabled={
@@ -295,14 +302,14 @@ export default function ChatPane({
             <RefreshCcw size={17} />
           </IconButton>
           <IconButton
-            label="View tracing"
+            label={t("chat.view_tracing")}
             onClick={() => onOpenTracing(currentThread?.id)}
             disabled={!currentThread?.id || isDraftThread}
           >
             <Workflow size={17} />
           </IconButton>
           <IconButton
-            label="Scan project images"
+            label={t("chat.scan_images")}
             onClick={onScan}
             disabled={!projectOpen}
           >
@@ -318,38 +325,32 @@ export default function ChatPane({
       >
         {!projectOpen ? (
           <div className="empty-chat">
-            <strong>Open a project to start.</strong>
-            <span>
-              Threads, messages, and generated assets stay inside the selected
-              folder.
-            </span>
+            <strong>{t("chat.no_project_title")}</strong>
+            <span>{t("chat.no_project_body")}</span>
           </div>
         ) : connectionState !== "online" ? (
           <div className="empty-chat">
-            <strong>WebSocket disconnected.</strong>
-            <span>
-              Recent messages remain visible; sending is disabled until the
-              connection returns.
-            </span>
+            <strong>{t("chat.connection_title")}</strong>
+            <span>{t("chat.connection_body")}</span>
           </div>
         ) : isDraftThread ? (
           <div className="empty-chat">
-            <strong>准备新会话</strong>
-            <span>发送第一条消息后才会创建 thread。</span>
+            <strong>{t("chat.pending_thread_title")}</strong>
+            <span>{t("chat.pending_thread_body")}</span>
           </div>
         ) : !currentThread ? (
           <div className="empty-chat">
-            <strong>No thread.</strong>
-            <span>Send a message to start a new one.</span>
+            <strong>{t("chat.no_thread_title")}</strong>
+            <span>{t("chat.no_thread_body")}</span>
           </div>
         ) : !pagination.initialLoaded && pagination.loadingLatest ? (
           <div className="empty-chat">
-            <strong>Loading messages.</strong>
+            <strong>{t("chat.loading_title")}</strong>
           </div>
         ) : turns.length === 0 ? (
           <div className="empty-chat">
-            <strong>No messages yet.</strong>
-            <span>Describe the image you want to create.</span>
+            <strong>{t("chat.empty_title")}</strong>
+            <span>{t("chat.empty_body")}</span>
           </div>
         ) : null}
 
@@ -362,8 +363,8 @@ export default function ChatPane({
               disabled={pagination.loadingBefore || !pagination.hasMoreBefore}
             >
               {pagination.loadingBefore
-                ? "Loading earlier turns..."
-                : "Load earlier turns"}
+                ? t("chat.load_earlier_loading")
+                : t("chat.load_earlier")}
             </button>
           </div>
         ) : null}
@@ -391,13 +392,15 @@ export default function ChatPane({
                   key={item.id}
                   data-item-id={item.id}
                 >
-                  {renderItem(
-                    item,
-                    assets,
-                    onLocateAsset,
-                    onApprovalRespond,
-                    onUpdateItem,
-                  )}
+                {renderItem(
+                  item,
+                  assets,
+                  onLocateAsset,
+                  onApprovalRespond,
+                  onUpdateItem,
+                  canUseChat && !agentRunning,
+                  t,
+                )}
                 </article>
               ))}
 
@@ -406,9 +409,9 @@ export default function ChatPane({
                   <div className="assistant-body">
                     <span className="message-type">
                       <Bot size={13} />
-                      assistant
+                      {t("role.assistant", {}, "assistant")}
                     </span>
-                    <MessageBody content={turn.streamingText} canEdit={false} />
+                    <MessageBody content={turn.streamingText} canEdit={false} t={t} />
                   </div>
                 </article>
               ) : null}
@@ -433,7 +436,7 @@ export default function ChatPane({
               disabled={pagination.loadingLatest}
             >
               {pagination.loadingLatest
-                ? "Loading latest..."
+                ? t("chat.latest_loading")
                 : latestButtonLabel}
             </button>
           </div>
@@ -447,7 +450,7 @@ export default function ChatPane({
               <img alt="" src={previewUrl(asset)} />
               <span>{asset.file_name}</span>
               <IconButton
-                label="Remove reference"
+                label={t("chat.remove_reference")}
                 onClick={() => onRemoveReference(asset.id)}
               >
                 <X size={13} />
@@ -467,12 +470,12 @@ export default function ChatPane({
               <span>{reference.file_name}</span>
               <small>
                 {reference.status === "failed"
-                  ? reference.error || "failed"
-                  : "uploading"}
+                  ? reference.error || t("common.failed")
+                  : t("common.uploading")}
               </small>
               {reference.status === "failed" ? (
                 <IconButton
-                  label="Dismiss failed upload"
+                  label={t("chat.dismiss_failed_upload")}
                   onClick={() => onRemovePendingReference?.(reference.id)}
                 >
                   <X size={13} />
@@ -483,10 +486,18 @@ export default function ChatPane({
           {selectedDataProvider ? (
             <span className="reference-chip provider-chip">
               <img alt="" src={selectedDataProvider.icon} />
-              <span>已附加 {selectedDataProvider.name} 数据源</span>
-              <small>{selectedDataProvider.loaded ? "已加载" : "未加载"}</small>
+              <span>
+                {t("chat.data_provider_attached", {
+                  name: selectedDataProvider.name,
+                })}
+              </span>
+              <small>
+                {selectedDataProvider.loaded
+                  ? t("chat.data_provider_loaded_state")
+                  : t("chat.data_provider_not_loaded_state")}
+              </small>
               <IconButton
-                label="Remove data provider"
+                label={t("chat.remove_data_provider")}
                 onClick={() => onDataProviderChange?.(null)}
               >
                 <X size={13} />
@@ -500,13 +511,14 @@ export default function ChatPane({
           onSubmit={handleComposerAction}
           onPasteImages={onPasteImages}
           disabled={!canUseChat}
+          placeholderText={t("chat.prompt_placeholder", {}, "Describe the image you want to create...")}
         />
         <div className="composer-footer">
           <div className="composer-left">
             <label
               className={`composer-upload icon-button ${!projectOpen ? "disabled" : ""}`}
-              title="Add image"
-              aria-label="Add image"
+              title={t("chat.add_image")}
+              aria-label={t("chat.add_image")}
               aria-disabled={!projectOpen}
             >
               <ImagePlus size={17} />
@@ -536,6 +548,7 @@ export default function ChatPane({
                 <ComposerDataProviderPanel
                   providers={DATA_PROVIDERS}
                   selectedProvider={selectedDataProvider}
+                  t={t}
                   onSelect={(provider) => {
                     onDataProviderChange?.({ ...provider, loaded: true });
                     setProviderPanelOpen(false);
@@ -564,20 +577,21 @@ export default function ChatPane({
                     onImageSettingsChange(defaultImageSettings);
                     setImagePanelOpen(false);
                   }}
+                  t={t}
                 />
               ) : null}
             </div>
             <button
               className="composer-settings-button"
               type="button"
-              title="Composer settings"
-              aria-label="Composer settings"
+              title={t("chat.composer_settings")}
+              aria-label={t("chat.composer_settings")}
               onClick={() => setSettingsDialogOpen(true)}
               disabled={!projectOpen}
             >
               <Settings2 size={14} />
               <span className="composer-settings-summary">
-                {settingsSummary || "Settings"}
+                {settingsSummary || t("common.settings")}
               </span>
             </button>
             <button
@@ -604,6 +618,7 @@ export default function ChatPane({
             projectOpen={projectOpen}
             onChange={onComposerSettingsChange}
             onClose={() => setSettingsDialogOpen(false)}
+            t={t}
           />
         ) : null}
       </div>
@@ -616,11 +631,12 @@ function ComposerDataProviderPanel({
   selectedProvider,
   onSelect,
   onClear,
+  t = defaultT,
 }) {
   return (
     <section
       className="composer-data-provider-panel"
-      aria-label="Data providers"
+      aria-label={t("chat.data_provider")}
     >
       <div className="data-provider-list">
         {providers.map((provider) => {
@@ -638,7 +654,7 @@ function ComposerDataProviderPanel({
                 <strong>{provider.name}</strong>
                 <small>{provider.slug}</small>
               </span>
-              <em>{selected ? "Loaded" : "Load"}</em>
+              <em>{selected ? t("composer.loaded") : t("composer.load")}</em>
             </button>
           );
         })}
@@ -650,14 +666,14 @@ function ComposerDataProviderPanel({
           onClick={onClear}
         >
           <X size={13} />
-          <span>Remove</span>
+          <span>{t("composer.remove")}</span>
         </button>
       ) : null}
     </section>
   );
 }
 
-function ComposerImageSettingsPanel({ imageSettings, onChange, onCancel }) {
+function ComposerImageSettingsPanel({ imageSettings, onChange, onCancel, t = defaultT }) {
   const selectedRatio = imageSettings?.image_ratio || "auto";
   const selectedCount = Number(imageSettings?.image_count) || 1;
   const transparent = Boolean(imageSettings?.transparent_background);
@@ -665,10 +681,10 @@ function ComposerImageSettingsPanel({ imageSettings, onChange, onCancel }) {
   return (
     <section
       className="composer-image-settings-panel"
-      aria-label="Image settings"
+      aria-label={t("chat.image_settings")}
     >
       <div className="image-settings-group">
-        <span className="image-settings-label">Ratio</span>
+        <span className="image-settings-label">{t("composer.ratio")}</span>
         <div className="image-settings-options ratio-options">
           {IMAGE_RATIOS.map((ratio) => (
             <button
@@ -677,13 +693,13 @@ function ComposerImageSettingsPanel({ imageSettings, onChange, onCancel }) {
               key={ratio}
               onClick={() => onChange({ image_ratio: ratio })}
             >
-              {ratio === "auto" ? "Auto" : ratio}
+              {ratio === "auto" ? t("settings.option.auto") : ratio}
             </button>
           ))}
         </div>
       </div>
       <div className="image-settings-group">
-        <span className="image-settings-label">Count</span>
+        <span className="image-settings-label">{t("composer.count")}</span>
         <div className="image-settings-options count-options">
           {IMAGE_COUNTS.map((count) => (
             <button
@@ -705,7 +721,7 @@ function ComposerImageSettingsPanel({ imageSettings, onChange, onCancel }) {
             onChange({ transparent_background: event.target.checked })
           }
         />
-        <span>Transparent</span>
+        <span>{t("composer.transparent")}</span>
       </label>
       <div className="image-settings-actions">
         <button
@@ -714,7 +730,7 @@ function ComposerImageSettingsPanel({ imageSettings, onChange, onCancel }) {
           onClick={onCancel}
         >
           <X size={13} />
-          <span>Reset</span>
+          <span>{t("common.reset")}</span>
         </button>
       </div>
     </section>
@@ -728,6 +744,7 @@ function ComposerSettingsDialog({
   projectOpen,
   onChange,
   onClose,
+  t = defaultT,
 }) {
   return (
     <div
@@ -739,54 +756,58 @@ function ComposerSettingsDialog({
         className="composer-settings-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="Composer settings"
+        aria-label={t("chat.composer_settings")}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="composer-settings-header">
           <div>
-            <h3>Composer settings</h3>
-            <span>
-              Applies to the next turn and future turns in this thread.
-            </span>
+            <h3>{t("chat.composer_settings")}</h3>
+            <span>{t("chat.composer_settings_body")}</span>
           </div>
-          <IconButton label="Close settings" onClick={onClose}>
+          <IconButton label={t("composer.close_settings")} onClick={onClose}>
             <X size={15} />
           </IconButton>
         </header>
         <div className="composer-settings-fields">
           <ComposerSelect
-            label="Model"
+            label={t("composer.model")}
             value={composerSettings.model || ""}
             disabled={!canUseChat}
             onChange={(value) => onChange({ model: value })}
             options={[
-              ["", "Codex config"],
+              ["", t("settings.option.codex_config")],
               ...modelOptionsForSelect(modelOptions),
             ]}
           />
           <ComposerSelect
-            label="Reasoning"
+            label={t("composer.reasoning")}
             value={composerSettings.effort || ""}
             disabled={!canUseChat}
             onChange={(value) => onChange({ effort: value })}
             options={[
-              ["", "Codex config"],
+              ["", t("settings.option.codex_config")],
               ...REASONING_EFFORTS.map((effort) => [effort, effort]),
             ]}
           />
           <ComposerSelect
-            label="Access"
+            label={t("composer.access")}
             value={composerSettings.sandbox_mode || "workspace-write"}
             disabled={!projectOpen}
             onChange={(value) => onChange({ sandbox_mode: value })}
-            options={SANDBOX_PRESETS}
+            options={SANDBOX_PRESETS.map(([value, label]) => [
+              value,
+              sandboxLabel(value, label, t),
+            ])}
           />
           <ComposerSelect
-            label="Approval"
+            label={t("composer.approval")}
             value={composerSettings.approval_policy || "never"}
             disabled={!canUseChat}
             onChange={(value) => onChange({ approval_policy: value })}
-            options={APPROVAL_POLICIES}
+            options={APPROVAL_POLICIES.map(([value, label]) => [
+              value,
+              approvalPolicyLabel(value, label, t),
+            ])}
           />
         </div>
       </section>
@@ -796,7 +817,7 @@ function ComposerSettingsDialog({
 
 function ComposerSelect({ label, value, options, disabled, onChange }) {
   const selectedOption = options.find(([optionValue]) => optionValue === value);
-  const title = `${label}: ${selectedOption?.[1] || value || "Codex config"}`;
+  const title = `${label}: ${selectedOption?.[1] || value || ""}`;
 
   return (
     <label
@@ -820,7 +841,7 @@ function ComposerSelect({ label, value, options, disabled, onChange }) {
   );
 }
 
-function composerSettingsSummary(settings, currentThread, modelOptions, siteSettings = {}) {
+function composerSettingsSummary(settings, currentThread, modelOptions, siteSettings = {}, t = defaultT) {
   const modelValue =
     settings.model ||
     currentThread?.default_model ||
@@ -844,13 +865,19 @@ function composerSettingsSummary(settings, currentThread, modelOptions, siteSett
   const modelLabel = modelValue
     ? optionLabel(modelOptionsForSelect(modelOptions), modelValue)
     : "";
-  const sandboxLabel = optionLabel(SANDBOX_PRESETS, sandboxValue) || "Auto";
+  const sandboxText =
+    sandboxLabel(sandboxValue, optionLabel(SANDBOX_PRESETS, sandboxValue), t) ||
+    t("settings.option.auto");
   const approvalLabel =
     approvalValue === "never"
       ? ""
-      : optionLabel(APPROVAL_POLICIES, approvalValue);
+      : approvalPolicyLabel(
+          approvalValue,
+          optionLabel(APPROVAL_POLICIES, approvalValue),
+          t,
+        );
 
-  return [modelLabel || modelValue, effortValue, sandboxLabel, approvalLabel]
+  return [modelLabel || modelValue, effortValue, sandboxText, approvalLabel]
     .filter(Boolean)
     .join(" · ");
 }
@@ -864,20 +891,39 @@ function imageSettingsChanged(settings) {
   );
 }
 
-function imageSettingsSummary(settings) {
-  if (!imageSettingsChanged(settings)) return "Image settings";
+function imageSettingsSummary(settings, t = defaultT) {
+  if (!imageSettingsChanged(settings)) return t("chat.image_settings");
 
   const parts = [];
   if (settings.image_ratio !== "auto") parts.push(settings.image_ratio);
   if (Number(settings.image_count) > 1)
-    parts.push(`${settings.image_count} images`);
-  if (settings.transparent_background) parts.push("transparent");
+    parts.push(t("chat.image_settings_count", { count: settings.image_count }));
+  if (settings.transparent_background) parts.push(t("chat.image_settings_transparent"));
 
-  return `Image settings: ${parts.join(" · ")}`;
+  return t("chat.image_settings_detail", { settings: parts.join(" · ") });
 }
 
 function optionLabel(options, value) {
   return options.find(([optionValue]) => optionValue === value)?.[1] || "";
+}
+
+function sandboxLabel(value, fallback, t = defaultT) {
+  if (value === "workspace-write") {
+    return fallback === "Auto"
+      ? t("settings.option.auto")
+      : t("settings.option.workspace_write");
+  }
+  if (value === "read-only") return t("settings.option.read_only");
+  if (value === "danger-full-access") return t("settings.option.full_access");
+  return fallback;
+}
+
+function approvalPolicyLabel(value, fallback, t = defaultT) {
+  if (value === "never") return t("settings.option.no_approval");
+  if (value === "on-request") return t("settings.option.on_request");
+  if (value === "on-failure") return t("settings.option.on_failure");
+  if (value === "untrusted") return t("settings.option.untrusted");
+  return fallback;
 }
 
 function renderItem(
@@ -886,6 +932,8 @@ function renderItem(
   onLocateAsset,
   onApprovalRespond,
   onUpdateItem,
+  canEditMessages,
+  t = defaultT,
 ) {
   if (item.type === "user_message") {
     return (
@@ -893,6 +941,8 @@ function renderItem(
         item={item}
         assets={assets}
         onUpdateItem={onUpdateItem}
+        canEdit={canEditMessages && !item.payload?.steered}
+        t={t}
       />
     );
   }
@@ -902,23 +952,24 @@ function renderItem(
       <div className="assistant-body">
         <span className="message-type">
           <Bot size={13} />
-          assistant
+          {t("role.assistant", {}, "assistant")}
         </span>
         <MessageBody
           item={item}
           content={item.content || ""}
           onUpdateItem={onUpdateItem}
+          t={t}
         />
       </div>
     );
   }
 
   if (item.type === "tool_call" || item.type === "tool_result") {
-    return <ToolRow item={item} />;
+    return <ToolRow item={item} t={t} />;
   }
 
   if (item.type === "approval_request") {
-    return <ApprovalCard item={item} onRespond={onApprovalRespond} />;
+    return <ApprovalCard item={item} onRespond={onApprovalRespond} t={t} />;
   }
 
   if (item.type === "image_asset") {
@@ -932,7 +983,7 @@ function renderItem(
           <span className="asset-row-icon">
             <ImageIcon size={16} />
           </span>
-          <span>{item.content || "Missing image"}</span>
+          <span>{item.content || t("chat.missing_image")}</span>
         </div>
       );
     }
@@ -956,7 +1007,7 @@ function renderItem(
     return (
       <div className="error-block">
         <AlertCircle size={15} />
-        <span>{item.content || item.payload?.message || "Agent error"}</span>
+        <span>{item.content || item.payload?.message || t("app.error_occurred")}</span>
       </div>
     );
   }
@@ -966,11 +1017,12 @@ function renderItem(
       item={item}
       content={item.content || item.payload?.message || ""}
       onUpdateItem={onUpdateItem}
+      t={t}
     />
   );
 }
 
-function UserMessageItem({ item, assets, onUpdateItem }) {
+function UserMessageItem({ item, assets, onUpdateItem, canEdit = true, t = defaultT }) {
   const [isEditingMessage, setIsEditingMessage] = useState(false);
   const assetIds = Array.isArray(item.payload?.asset_ids)
     ? item.payload.asset_ids
@@ -986,10 +1038,12 @@ function UserMessageItem({ item, assets, onUpdateItem }) {
           content={item.content}
           onUpdateItem={onUpdateItem}
           onEditingChange={setIsEditingMessage}
+          canEdit={canEdit}
+          t={t}
         />
       ) : null}
       {assetIds.length > 0 ? (
-        <ReferencePreviewList assetIds={assetIds} assets={assets} />
+        <ReferencePreviewList assetIds={assetIds} assets={assets} t={t} />
       ) : null}
     </div>
   );
@@ -1001,13 +1055,16 @@ function MessageBody({
   onUpdateItem,
   canEdit = true,
   onEditingChange,
+  t = defaultT,
 }) {
   const text = content || "";
-  const editable = canEdit && item?.id && onUpdateItem;
+  const canSubmitEdit = Boolean(item?.id && onUpdateItem);
+  const editable = canEdit && canSubmitEdit;
   const [draft, setDraft] = useState(text);
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [copied, setCopied] = useState(false);
+  const isSavingRef = useRef(false);
 
   useEffect(() => {
     onEditingChange?.(isEditing);
@@ -1025,25 +1082,30 @@ function MessageBody({
     setIsEditing(true);
   }
 
-  async function handleSave() {
-    if (!editable || isSaving) return;
+  async function handleSave(event) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    if (!canSubmitEdit || isSavingRef.current) return;
     if (draft === text) {
       setIsEditing(false);
       return;
     }
 
+    isSavingRef.current = true;
     setIsSaving(true);
     try {
-      await onUpdateItem(item, draft);
+      const saved = await onUpdateItem(item, draft);
+      if (saved === false) return;
       setIsEditing(false);
     } finally {
+      isSavingRef.current = false;
       setIsSaving(false);
     }
   }
 
   if (isEditing) {
     return (
-      <div className="message-body message-body-editing">
+      <form className="message-body message-body-editing" onSubmit={handleSave}>
         <textarea
           className="message-edit-input"
           value={draft}
@@ -1059,11 +1121,18 @@ function MessageBody({
         <div className="message-actions message-edit-actions">
           <button
             className="message-action"
-            type="button"
-            onClick={handleSave}
-            disabled={isSaving}
-            aria-label="Save message edit"
-            title="Save"
+            type="submit"
+            disabled={isSaving || !canSubmitEdit}
+            aria-label={
+              item?.type === "user_message"
+                ? t("chat.save_and_rerun")
+                : t("chat.save_message_edit")
+            }
+            title={
+              item?.type === "user_message"
+                ? t("chat.save_and_rerun")
+                : t("common.save")
+            }
           >
             <Check size={14} />
           </button>
@@ -1072,13 +1141,13 @@ function MessageBody({
             type="button"
             onClick={() => setIsEditing(false)}
             disabled={isSaving}
-            aria-label="Cancel message edit"
-            title="Cancel"
+            aria-label={t("chat.cancel_message_edit")}
+            title={t("common.cancel")}
           >
             <X size={14} />
           </button>
         </div>
-      </div>
+      </form>
     );
   }
 
@@ -1091,8 +1160,8 @@ function MessageBody({
           type="button"
           onClick={handleCopy}
           disabled={!text}
-          aria-label="Copy message"
-          title="Copy"
+          aria-label={t("chat.copy_message")}
+          title={t("common.copy")}
         >
           <Copy size={13} />
         </button>
@@ -1101,21 +1170,21 @@ function MessageBody({
             className="message-action"
             type="button"
             onClick={handleStartEdit}
-            aria-label="Edit message"
-            title="Edit"
+            aria-label={t("chat.edit_message")}
+            title={t("common.edit")}
           >
             <Pencil size={13} />
           </button>
         ) : null}
         {copied ? (
-          <span className="message-action-feedback">copied</span>
+          <span className="message-action-feedback">{t("chat.copied")}</span>
         ) : null}
       </div>
     </div>
   );
 }
 
-function ReferencePreviewList({ assetIds, assets }) {
+function ReferencePreviewList({ assetIds, assets, t = defaultT }) {
   const visibleAssetIds = assetIds.filter((assetId) => {
     const asset = assets.find((candidate) => candidate.id === assetId);
     return asset?.source !== "mask";
@@ -1132,7 +1201,7 @@ function ReferencePreviewList({ assetIds, assets }) {
           return (
             <span className="message-reference missing" key={assetId}>
               <ImageIcon size={13} />
-              Missing image
+              {t("chat.missing_image")}
             </span>
           );
         }
@@ -1148,7 +1217,7 @@ function ReferencePreviewList({ assetIds, assets }) {
   );
 }
 
-function ToolRow({ item }) {
+function ToolRow({ item, t = defaultT }) {
   const payload = item.payload || {};
   const codexItem = payload.codex_item || {};
   const status = item.status || "completed";
@@ -1160,7 +1229,7 @@ function ToolRow({ item }) {
         <TerminalSquare size={14} />
         <span className={`tool-status ${status}`}>{status}</span>
         <span className="tool-name">
-          {payload.tool_name || toolName(codexItem) || "tool"}
+          {payload.tool_name || toolName(codexItem) || t("tool.generic", {}, "tool")}
         </span>
         <span className="tool-summary">
           {item.content || toolSummary(codexItem)}
@@ -1171,7 +1240,7 @@ function ToolRow({ item }) {
   );
 }
 
-function ApprovalCard({ item, onRespond }) {
+function ApprovalCard({ item, onRespond, t = defaultT }) {
   const payload = item.payload || {};
   const action = payload.action || payload.event?.action || {};
   const review = payload.review || payload.event?.review || {};
@@ -1189,20 +1258,26 @@ function ApprovalCard({ item, onRespond }) {
           <ShieldAlert size={15} />
         </span>
         <div>
-          <strong>{approvalTitle(action)}</strong>
+          <strong>{approvalTitle(action, t)}</strong>
           <span>{approvalSubtitle(action)}</span>
         </div>
         <span className={`approval-status ${status}`}>
-          {approvalStatusLabel(status)}
+          {approvalStatusLabel(status, t)}
         </span>
       </div>
 
       {review.rationale ? <p>{review.rationale}</p> : null}
 
       <div className="approval-facts">
-        {review.riskLevel ? <span>Risk {review.riskLevel}</span> : null}
+        {review.riskLevel ? (
+          <span>{t("chat.approval_risk", { level: review.riskLevel })}</span>
+        ) : null}
         {payload.target_item_id ? (
-          <span>Target {String(payload.target_item_id).slice(0, 8)}</span>
+          <span>
+            {t("chat.approval_target", {
+              target: String(payload.target_item_id).slice(0, 8),
+            })}
+          </span>
         ) : null}
       </div>
 
@@ -1214,7 +1289,7 @@ function ApprovalCard({ item, onRespond }) {
             onClick={() => onRespond?.(item, "approve")}
           >
             <Check size={14} />
-            Approve
+            {t("common.approve")}
           </button>
           <button
             type="button"
@@ -1222,14 +1297,14 @@ function ApprovalCard({ item, onRespond }) {
             onClick={() => onRespond?.(item, "deny")}
           >
             <X size={14} />
-            Deny
+            {t("approval.deny", {}, "Deny")}
           </button>
         </div>
       ) : null}
 
       {detail ? (
         <details className="approval-details">
-          <summary>Payload</summary>
+          <summary>{t("chat.approval_payload")}</summary>
           <pre>{detail}</pre>
         </details>
       ) : null}
@@ -1245,12 +1320,12 @@ function composerActionMode({ agentRunning, hasDraft, activeStatus }) {
   return "disabled";
 }
 
-function composerActionTitle(mode, hasPendingUploads) {
-  if (mode === "stop") return "Stop";
-  if (mode === "stopping") return "Stopping";
-  if (hasPendingUploads) return "Uploading image";
-  if (mode === "steer") return "Send follow-up";
-  return "Send";
+function composerActionTitle(mode, hasPendingUploads, t = defaultT) {
+  if (mode === "stop") return t("chat.stop");
+  if (mode === "stopping") return t("chat.stopping");
+  if (hasPendingUploads) return t("chat.uploading_image");
+  if (mode === "steer") return t("chat.send_follow_up");
+  return t("common.send");
 }
 
 function groupTurns(items, activeRun, streamingText) {
@@ -1365,14 +1440,14 @@ function approvalPending(item) {
   return status === "pending" || status === "inProgress";
 }
 
-function approvalTitle(action) {
-  if (action.type === "command") return "Command approval";
-  if (action.type === "execve") return "Program approval";
-  if (action.type === "applyPatch") return "Patch approval";
-  if (action.type === "networkAccess") return "Network approval";
-  if (action.type === "mcpToolCall") return "MCP approval";
-  if (action.type === "requestPermissions") return "Permission approval";
-  return "Approval request";
+function approvalTitle(action, t = defaultT) {
+  if (action.type === "command") return t("approval.command", {}, "Command approval");
+  if (action.type === "execve") return t("approval.program", {}, "Program approval");
+  if (action.type === "applyPatch") return t("approval.patch", {}, "Patch approval");
+  if (action.type === "networkAccess") return t("approval.network", {}, "Network approval");
+  if (action.type === "mcpToolCall") return t("approval.mcp", {}, "MCP approval");
+  if (action.type === "requestPermissions") return t("approval.permission", {}, "Permission approval");
+  return t("approval.request", {}, "Approval request");
 }
 
 function approvalSubtitle(action) {
@@ -1392,9 +1467,10 @@ function approvalSubtitle(action) {
   return "";
 }
 
-function approvalStatusLabel(status) {
-  if (status === "pending" || status === "inProgress") return "waiting";
-  if (status === "timedOut") return "timed out";
+function approvalStatusLabel(status, t = defaultT) {
+  if (status === "pending" || status === "inProgress")
+    return t("status.waiting");
+  if (status === "timedOut") return t("status.timed_out", {}, "timed out");
   return status;
 }
 
