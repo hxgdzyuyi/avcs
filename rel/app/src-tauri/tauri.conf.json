@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Avcs",
-  "version": "0.1.0",
   "identifier": "dev.avcs.Avcs",
   "app": {
     "withGlobalTauri": false,
@@ -13,7 +12,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
-    "createUpdaterArtifacts": false,
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,6 +41,12 @@
       "desktop": {
         "schemes": ["avcs"]
       }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/hxgdzyuyi/avcs/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ5NzEwRUJDOUVDNDc0RUEKUldUcWRNU2V2QTV4MlNDQUc0UXJiTUNWemtBNFNwVFZuNzZ0YkJHUkRraXJ1TTY2NlMwbnpDTG0K"
     }
   }
 }
