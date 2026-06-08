@@ -100,6 +100,8 @@ export default function App() {
   const [promptRequest, setPromptRequest] = useState(null);
   const [expandedProjectIds, setExpandedProjectIds] = useState([]);
   const [showAllThreadProjectIds, setShowAllThreadProjectIds] = useState([]);
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
+  const [projectDrawerOpen, setProjectDrawerOpen] = useState(false);
   const [collapsedLeftAndMiddle, setCollapsedLeftAndMiddle] = useState(false);
   const [projectSqliteInfo, setProjectSqliteInfo] = useState(null);
   const [projectSqliteInfoProjectId, setProjectSqliteInfoProjectId] =
@@ -136,6 +138,23 @@ export default function App() {
   useEffect(() => {
     tRef.current = t;
   }, [t]);
+
+  useEffect(() => {
+    if (!leftSidebarCollapsed && projectDrawerOpen) {
+      setProjectDrawerOpen(false);
+    }
+  }, [leftSidebarCollapsed, projectDrawerOpen]);
+
+  useEffect(() => {
+    if (!projectDrawerOpen) return undefined;
+
+    function handleKeyDown(event) {
+      if (event.key === "Escape") setProjectDrawerOpen(false);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [projectDrawerOpen]);
 
   const confirmAction = useCallback((options = {}) => {
     if (confirmResolverRef.current) {
@@ -2567,6 +2586,47 @@ export default function App() {
       onConfirm={(value) => settlePrompt(value)}
     />
   ) : null;
+  const appShellClassName = [
+    "app-shell",
+    collapsedLeftAndMiddle ? "collapsed-panes" : "",
+    leftSidebarCollapsed ? "left-sidebar-collapsed" : "",
+    projectDrawerOpen ? "project-drawer-open" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const workbenchClassName = [
+    "workbench",
+    collapsedLeftAndMiddle ? "collapsed-panes" : "",
+    leftSidebarCollapsed ? "left-sidebar-collapsed" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const workbenchBodyClassName = [
+    "workbench-body",
+    collapsedLeftAndMiddle ? "collapsed-panes" : "",
+    leftSidebarCollapsed ? "left-sidebar-collapsed" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  function handleCollapseLeftSidebar() {
+    setLeftSidebarCollapsed(true);
+    setProjectDrawerOpen(false);
+    setMobileView((current) => (current === "project" ? "thread" : current));
+  }
+
+  function handleExpandLeftSidebar() {
+    setLeftSidebarCollapsed(false);
+    setProjectDrawerOpen(false);
+  }
+
+  function handleOpenProjectDrawer() {
+    if (leftSidebarCollapsed) setProjectDrawerOpen(true);
+  }
+
+  function closeProjectDrawer() {
+    setProjectDrawerOpen(false);
+  }
 
   if (tracingThreadId) {
     return (
@@ -2625,7 +2685,7 @@ export default function App() {
       </nav>
 
       <div
-        className={`app-shell${collapsedLeftAndMiddle ? " collapsed-panes" : ""}`}
+        className={appShellClassName}
         data-mobile-view={mobileView}
       >
         <ProjectPane
@@ -2638,13 +2698,28 @@ export default function App() {
           showAllThreadProjectIds={showAllThreadProjectIds}
           currentThreadId={currentThreadId}
           draftThreadProjectId={draftThreadProjectId}
-          onOpenProject={handleOpenProject}
-          onCreateBlankProject={handleCreateBlankProject}
-          onSelectProject={handleSelectProject}
+          onOpenProject={(event) => {
+            closeProjectDrawer();
+            return handleOpenProject(event);
+          }}
+          onCreateBlankProject={() => {
+            closeProjectDrawer();
+            return handleCreateBlankProject();
+          }}
+          onSelectProject={(...args) => {
+            closeProjectDrawer();
+            return handleSelectProject(...args);
+          }}
           onToggleProjectExpanded={handleToggleProjectExpanded}
           onToggleShowAllThreads={handleToggleShowAllThreads}
-          onCreateThread={handlePrepareNewThread}
-          onSelectThread={handleSelectThread}
+          onCreateThread={(...args) => {
+            closeProjectDrawer();
+            return handlePrepareNewThread(...args);
+          }}
+          onSelectThread={(...args) => {
+            closeProjectDrawer();
+            return handleSelectThread(...args);
+          }}
           onRenameProject={handleRenameProject}
           onRenameThread={handleRenameThread}
           onDeleteThread={handleDeleteThread}
@@ -2654,19 +2729,31 @@ export default function App() {
           onReorderProjects={handleReorderProjects}
           onReorderThreads={handleReorderThreads}
           onShowProjectDbInfo={handleShowProjectDbInfo}
-          onOpenSettings={handleOpenSettings}
+          onCollapseSidebar={handleCollapseLeftSidebar}
+          onOpenSettings={() => {
+            closeProjectDrawer();
+            handleOpenSettings();
+          }}
           connectionState={connectionState}
           agentRunning={anyAgentRunning}
           agentThinkingStep={agentThinking.step}
           runningThreadIds={runningThreadIds}
           t={t}
         />
+        {leftSidebarCollapsed && projectDrawerOpen ? (
+          <button
+            className="project-drawer-backdrop"
+            type="button"
+            aria-label={t("project.close_sidebar_drawer")}
+            onClick={closeProjectDrawer}
+          />
+        ) : null}
 
         <section
-          className={`workbench${collapsedLeftAndMiddle ? " collapsed-panes" : ""}`}
+          className={workbenchClassName}
         >
           <div
-            className={`workbench-body${collapsedLeftAndMiddle ? " collapsed-panes" : ""}`}
+            className={workbenchBodyClassName}
           >
             <ChatPane
               items={items}
@@ -2716,6 +2803,9 @@ export default function App() {
               onReturnToLatest={handleReturnToLatestItems}
               onLoadAroundTurn={handleLoadAroundTurn}
               onBottomStateChange={handleMessageBottomChange}
+              leftSidebarCollapsed={leftSidebarCollapsed}
+              onExpandSidebar={handleExpandLeftSidebar}
+              onOpenSidebarDrawer={handleOpenProjectDrawer}
               t={t}
             />
 

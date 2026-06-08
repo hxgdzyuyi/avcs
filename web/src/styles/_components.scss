@@ -103,8 +103,8 @@
 }
 
 .sidebar-brand-logo {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   flex: 0 0 auto;
   border-radius: 8px;
 }
@@ -131,6 +131,9 @@
 
 .project-menu-wrap {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .project-menu,
@@ -182,6 +185,14 @@
 .project-menu small {
   color: $muted;
   font-size: 11px;
+}
+
+.project-drawer-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  border: 0;
+  background: rgba(31, 35, 40, 0.24);
 }
 
 .project-open {
@@ -577,6 +588,55 @@
 .agent-thinking-dot.active {
   opacity: 1;
   transform: scale(1);
+}
+
+.thread-bar-main {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 12px;
+}
+
+.chat-sidebar-controls {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  gap: 4px;
+  padding-right: 10px;
+  border-right: 1px solid $soft-line;
+}
+
+.chat-brand-trigger {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  height: 32px;
+  gap: 7px;
+  padding: 0 7px 0 4px;
+  border: 0;
+  border-radius: 8px;
+  color: $ink;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.chat-brand-trigger:hover {
+  background: $panel;
+}
+
+.chat-brand-trigger img {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+}
+
+.chat-brand-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thread-title {
@@ -3956,6 +4016,10 @@
 }
 
 @media (max-width: 760px) {
+  .project-drawer-backdrop {
+    top: 44px;
+  }
+
   .sidebar-header,
   .pane-header {
     padding-right: 12px;

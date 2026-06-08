@@ -9,6 +9,7 @@ import {
   FolderPlus,
   MoreHorizontal,
   Database,
+  PanelLeftClose,
   Pencil,
   Plus,
   Settings,
@@ -46,6 +47,7 @@ export default function ProjectPane({
   onReorderProjects,
   onReorderThreads,
   onShowProjectDbInfo,
+  onCollapseSidebar,
   onOpenSettings,
   connectionState,
   agentRunning,
@@ -408,6 +410,17 @@ export default function ProjectPane({
         <div className="sidebar-header-actions">
           <span className={`connection-dot ${connectionState}`} title={`WebSocket ${connectionState}`} />
           <div className="project-menu-wrap" data-project-menu-root>
+            <IconButton
+              label={t("project.collapse_sidebar")}
+              onClick={() => {
+                setCurrentProjectMenuOpen(false);
+                setProjectMenuOpen(false);
+                setActiveProjectMenuId(null);
+                onCollapseSidebar?.();
+              }}
+            >
+              <PanelLeftClose size={17} />
+            </IconButton>
             <IconButton
               label={t("project.add_or_create")}
               className={projectMenuOpen ? "active" : ""}

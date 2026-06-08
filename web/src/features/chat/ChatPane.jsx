@@ -9,6 +9,7 @@ import {
   ImagePlus,
   LocateFixed,
   Palette,
+  PanelLeftOpen,
   Pencil,
   RefreshCcw,
   ScanLine,
@@ -111,6 +112,9 @@ export default function ChatPane({
   onLoadEarlier,
   onReturnToLatest,
   onBottomStateChange,
+  leftSidebarCollapsed = false,
+  onExpandSidebar,
+  onOpenSidebarDrawer,
   t = defaultT,
 }) {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -279,12 +283,35 @@ export default function ChatPane({
 
   return (
     <main className="chat-pane">
-      <div className="pane-header thread-bar">
-        <div className="thread-title">
-          <h2 title={threadTitle}>{threadTitle}</h2>
-          <span className={`agent-state ${threadStatus}`}>
-            {t(`status.${threadStatus}`, {}, threadStatus)}
-          </span>
+      <div className={`pane-header thread-bar${leftSidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+        <div className="thread-bar-main">
+          {leftSidebarCollapsed ? (
+            <div className="chat-sidebar-controls">
+              <button
+                className="chat-brand-trigger"
+                type="button"
+                title={t("project.open_sidebar_drawer")}
+                aria-label={t("project.open_sidebar_drawer")}
+                onClick={onOpenSidebarDrawer}
+              >
+                <img src="/favicon.png" alt="" aria-hidden="true" />
+                <span>Avcs</span>
+              </button>
+              <IconButton
+                className="ghost"
+                label={t("project.expand_sidebar")}
+                onClick={onExpandSidebar}
+              >
+                <PanelLeftOpen size={17} />
+              </IconButton>
+            </div>
+          ) : null}
+          <div className="thread-title">
+            <h2 title={threadTitle}>{threadTitle}</h2>
+            <span className={`agent-state ${threadStatus}`}>
+              {t(`status.${threadStatus}`, {}, threadStatus)}
+            </span>
+          </div>
         </div>
         <div className="toolbar">
           <IconButton

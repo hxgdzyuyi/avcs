@@ -34,11 +34,35 @@ input:disabled {
 }
 
 .app-shell {
+  --project-pane-width: 240px;
+  --chat-pane-width: 456px;
+  --chat-pane-expanded-width: calc(
+    var(--project-pane-width) + var(--chat-pane-width)
+  );
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: var(--project-pane-width) minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+}
+
+.app-shell.left-sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app-shell.left-sidebar-collapsed > .project-pane {
+  display: none;
+}
+
+.app-shell.left-sidebar-collapsed.project-drawer-open > .project-pane {
+  position: fixed;
+  z-index: 70;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  height: 100vh;
+  box-shadow: 18px 0 42px rgba(31, 35, 40, 0.18);
 }
 
 .app-shell.collapsed-panes {
@@ -69,7 +93,7 @@ input:disabled {
 }
 
 .project-pane {
-  width: 240px;
+  width: var(--project-pane-width);
   min-width: 220px;
   max-width: 280px;
 }
@@ -84,9 +108,13 @@ input:disabled {
 
 .workbench-body {
   display: grid;
-  grid-template-columns: 456px minmax(640px, 1fr);
+  grid-template-columns: var(--chat-pane-width) minmax(640px, 1fr);
   min-width: 0;
   min-height: 0;
+}
+
+.workbench-body.left-sidebar-collapsed {
+  grid-template-columns: var(--chat-pane-expanded-width) minmax(640px, 1fr);
 }
 
 .workbench-body.collapsed-panes {
@@ -104,9 +132,14 @@ input:disabled {
 }
 
 .chat-pane {
-  width: 456px;
+  width: var(--chat-pane-width);
   min-width: 380px;
   max-width: 520px;
+}
+
+.app-shell.left-sidebar-collapsed .chat-pane {
+  width: var(--chat-pane-expanded-width);
+  max-width: none;
 }
 
 .board-pane {
@@ -194,14 +227,16 @@ input:disabled {
 
 @media (max-width: 1080px) {
   .app-shell {
-    grid-template-columns: 240px minmax(380px, 1fr);
+    grid-template-columns: var(--project-pane-width) minmax(380px, 1fr);
   }
 
-  .workbench-body {
+  .workbench-body,
+  .workbench-body.left-sidebar-collapsed {
     grid-template-columns: minmax(380px, 1fr);
   }
 
-  .chat-pane {
+  .chat-pane,
+  .app-shell.left-sidebar-collapsed .chat-pane {
     width: auto;
     max-width: none;
   }
@@ -243,6 +278,12 @@ input:disabled {
 
   .app-shell {
     display: block;
+    height: calc(100vh - 44px);
+  }
+
+  .app-shell.left-sidebar-collapsed.project-drawer-open > .project-pane {
+    top: 44px;
+    width: min(86vw, 320px);
     height: calc(100vh - 44px);
   }
 
