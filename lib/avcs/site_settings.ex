@@ -39,7 +39,7 @@ defmodule Avcs.SiteSettings do
   @valid_efforts ~w(none minimal low medium high xhigh)
   @valid_approval_policies ~w(never untrusted on-failure on-request)
   @valid_sandbox_modes ~w(read-only workspace-write danger-full-access)
-  @valid_image_ratios ~w(auto 1:1 4:3 3:4 16:9 9:16)
+  @valid_image_ratios ~w(auto 1:1 16:9 9:16 4:3 3:4 3:1 1:3)
   @valid_locales ~w(en zh-hans)
 
   def keys, do: @setting_order

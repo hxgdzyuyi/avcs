@@ -14,6 +14,7 @@ import {
   shouldIgnoreGlobalShortcut,
 } from "./keyboard/shortcuts.js";
 import {
+  copyAssetToOutput,
   createBlankProject,
   deleteAsset,
   openProject,
@@ -24,6 +25,7 @@ import {
   projectSqliteMaintenance as runProjectSqliteMaintenance,
   uploadAsset,
   uploadMaskAsset,
+  uploadOutputAsset,
 } from "./api.js";
 import { createTranslator, normalizeLocale } from "./i18n.js";
 
@@ -2090,6 +2092,72 @@ export default function App() {
     }
   }
 
+  async function handleCopyAssetToOutput(assetId, placement = {}) {
+    if (!project) throw new Error(t("app.open_project_first"));
+    if (!assetId) return null;
+
+    setNotice("");
+
+    try {
+      const data = await copyAssetToOutput(assetId, placement);
+      await refreshAssetsAndBoard();
+
+      const boardItemId = data?.board_item?.id;
+      const outputAssetId = data?.asset?.id || assetId;
+
+      if (boardItemId) setSelectedBoardIds([boardItemId]);
+      if (outputAssetId) {
+        setBoardFocusRequest({
+          assetId: outputAssetId,
+          mode: "fit_if_outside",
+          requestId: Date.now(),
+        });
+      }
+
+      setNotice(t("app.image_copied_to_output"));
+      return data;
+    } catch (error) {
+      setNotice(error.message);
+      throw error;
+    }
+  }
+
+  async function handleUploadAssetToOutput(file, placement = {}) {
+    if (!project) throw new Error(t("app.open_project_first"));
+    if (!file) return null;
+
+    if (!isSupportedReferenceImage(file)) {
+      const error = new Error(t("app.unsupported_image"));
+      setNotice(error.message);
+      throw error;
+    }
+
+    setNotice("");
+
+    try {
+      const data = await uploadOutputAsset(file, placement);
+      await refreshAssetsAndBoard();
+
+      const boardItemId = data?.board_item?.id;
+      const outputAssetId = data?.asset?.id;
+
+      if (boardItemId) setSelectedBoardIds([boardItemId]);
+      if (outputAssetId) {
+        setBoardFocusRequest({
+          assetId: outputAssetId,
+          mode: "fit_if_outside",
+          requestId: Date.now(),
+        });
+      }
+
+      setNotice(t("app.image_copied_to_output"));
+      return data;
+    } catch (error) {
+      setNotice(error.message);
+      throw error;
+    }
+  }
+
   async function refreshAssetsAndBoard() {
     if (!channel) return;
     const [assetData, boardData] = await Promise.all([
@@ -2659,6 +2727,8 @@ export default function App() {
               projectId={project?.id}
               focusRequest={boardFocusRequest}
               onReferenceAsset={addReference}
+              onCopyAssetToOutput={handleCopyAssetToOutput}
+              onUploadAssetToOutput={handleUploadAssetToOutput}
               onResize={handleResize}
               onUpdateItems={handleUpdateBoardItems}
               onSendImagePrompt={handleSendImagePrompt}

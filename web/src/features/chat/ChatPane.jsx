@@ -50,6 +50,8 @@ const IMAGE_RATIOS = [
   "9:16",
   "4:3",
   "3:4",
+  "3:1",
+  "1:3",
 ];
 const IMAGE_COUNTS = [1, 2, 3, 4];
 const DATA_PROVIDERS = [

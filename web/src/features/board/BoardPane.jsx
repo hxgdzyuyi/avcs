@@ -27,6 +27,7 @@ import {
   SendToBack,
   Trash2,
   Undo2,
+  Upload,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -63,6 +64,8 @@ const BOARD_TABS = [
   ["output", "Output"],
   ["work", "Work"],
 ];
+const OUTPUT_DROP_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const OUTPUT_DROP_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
 const defaultT = (key, _params = {}, fallback = key) => fallback;
 
 export default function BoardPane({
@@ -71,6 +74,8 @@ export default function BoardPane({
   selectedIds,
   setSelectedIds,
   onReferenceAsset,
+  onCopyAssetToOutput,
+  onUploadAssetToOutput,
   onResize,
   onUpdateItems,
   onSendImagePrompt,
@@ -99,11 +104,14 @@ export default function BoardPane({
   const gestureRef = useRef(null);
   const lastGestureAtRef = useRef(0);
   const interactionRef = useRef(false);
+  const workDragAssetIdRef = useRef(null);
   const [camera, setCamera] = useState(DEFAULT_CAMERA);
   const [isPanning, setIsPanning] = useState(false);
   const [activeTab, setActiveTab] = useState("output");
   const [toolMode, setToolMode] = useState("select");
   const [spacePanActive, setSpacePanActive] = useState(false);
+  const [outputDropTarget, setOutputDropTarget] = useState(null);
+  const [copyingAssetId, setCopyingAssetId] = useState(null);
   const [primarySelectedId, setPrimarySelectedId] = useState(null);
   const [marquee, setMarquee] = useState(null);
   const [layoutMenu, setLayoutMenu] = useState(null);
@@ -149,6 +157,9 @@ export default function BoardPane({
     setObjectMenu(null);
     setPreviewDialog(null);
     setSpacePanActive(false);
+    setOutputDropTarget(null);
+    setCopyingAssetId(null);
+    workDragAssetIdRef.current = null;
   }, [projectId]);
 
   useEffect(() => {
@@ -170,6 +181,21 @@ export default function BoardPane({
     setObjectMenu(null);
     setSpacePanActive(false);
   }, [activeTab]);
+
+  useEffect(() => {
+    function clearWorkDrag() {
+      workDragAssetIdRef.current = null;
+      if (!copyingAssetId) setOutputDropTarget(null);
+    }
+
+    window.addEventListener("dragend", clearWorkDrag);
+    window.addEventListener("drop", clearWorkDrag);
+
+    return () => {
+      window.removeEventListener("dragend", clearWorkDrag);
+      window.removeEventListener("drop", clearWorkDrag);
+    };
+  }, [copyingAssetId]);
 
   useEffect(() => {
     if (!previewDialog) return;
@@ -903,6 +929,155 @@ export default function BoardPane({
     onReferenceAsset(primarySelectedItem.asset_id);
   }
 
+  function startWorkAssetDrag(asset, event) {
+    if (!asset?.id) return;
+
+    workDragAssetIdRef.current = asset.id;
+    setOutputDropTarget("tab");
+
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData("application/x-avcs-asset-id", asset.id);
+    event.dataTransfer.setData("text/plain", asset.file_name || asset.id);
+  }
+
+  function endWorkAssetDrag() {
+    workDragAssetIdRef.current = null;
+    if (!copyingAssetId) setOutputDropTarget(null);
+  }
+
+  function workAssetDragId(event) {
+    const id =
+      event.dataTransfer?.getData("application/x-avcs-asset-id") ||
+      workDragAssetIdRef.current;
+
+    if (!id) return null;
+    return workAssets.some((asset) => asset.id === id) ? id : null;
+  }
+
+  function outputDropFile(event) {
+    const files = Array.from(event.dataTransfer?.files || []);
+    return files.find(isSupportedOutputDropFile) || files[0] || null;
+  }
+
+  function hasFileDrop(event) {
+    const types = Array.from(event.dataTransfer?.types || []);
+    if (types.includes("Files")) return true;
+
+    return Array.from(event.dataTransfer?.items || []).some((item) => item.kind === "file");
+  }
+
+  function outputDropPayload(event) {
+    const assetId = workAssetDragId(event);
+    if (assetId) return { type: "asset", assetId };
+    if (hasFileDrop(event)) return { type: "file", file: outputDropFile(event) };
+    return null;
+  }
+
+  function acceptOutputDrop(event, target) {
+    const payload = outputDropPayload(event);
+    if (!payload || copyingAssetId) return null;
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (target === "tab") setActiveTab("output");
+    setOutputDropTarget(target);
+    return payload;
+  }
+
+  function handleOutputTabDragOver(event) {
+    acceptOutputDrop(event, "tab");
+  }
+
+  function handleOutputTabDrop(event) {
+    const payload = acceptOutputDrop(event, "tab");
+    if (!payload) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    applyOutputDrop(payload);
+  }
+
+  function handleOutputCanvasDragOver(event) {
+    acceptOutputDrop(event, "canvas");
+  }
+
+  function handleOutputCanvasDragLeave(event) {
+    if (event.currentTarget.contains(event.relatedTarget)) return;
+    if (!copyingAssetId) setOutputDropTarget(null);
+  }
+
+  function handleOutputCanvasDrop(event) {
+    const payload = acceptOutputDrop(event, "canvas");
+    if (!payload) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    applyOutputDrop(payload, outputDropPlacement(event));
+  }
+
+  function outputDropPlacement(event) {
+    const point = eventToScreenPoint(event);
+    const world = point ? screenToWorld(point, cameraRef.current) : null;
+    return world
+      ? { x: normalizeNumber(world.x), y: normalizeNumber(world.y) }
+      : {};
+  }
+
+  function applyOutputDrop(payload, placement = {}) {
+    if (payload.type === "asset") {
+      copyWorkAssetToOutput(payload.assetId, placement);
+      return;
+    }
+
+    if (payload.type === "file") {
+      uploadFileToOutput(payload.file, placement);
+    }
+  }
+
+  async function copyWorkAssetToOutput(assetId, placement = {}) {
+    if (!assetId || copyingAssetId) return;
+
+    setActiveTab("output");
+    setLayoutMenu(null);
+    setObjectMenu(null);
+    setPreviewDialog(null);
+    setCopyingAssetId(assetId);
+
+    try {
+      await onCopyAssetToOutput?.(assetId, placement);
+    } catch (_error) {
+      return;
+    } finally {
+      workDragAssetIdRef.current = null;
+      setOutputDropTarget(null);
+      setCopyingAssetId(null);
+    }
+  }
+
+  async function uploadFileToOutput(file, placement = {}) {
+    if (!file || copyingAssetId) {
+      setOutputDropTarget(null);
+      return;
+    }
+
+    setActiveTab("output");
+    setLayoutMenu(null);
+    setObjectMenu(null);
+    setPreviewDialog(null);
+    setCopyingAssetId(`file:${file.name || Date.now()}`);
+
+    try {
+      await onUploadAssetToOutput?.(file, placement);
+    } catch (_error) {
+      return;
+    } finally {
+      workDragAssetIdRef.current = null;
+      setOutputDropTarget(null);
+      setCopyingAssetId(null);
+    }
+  }
+
   function applyLayout(action) {
     const updates = layoutUpdates(action, selectedItems, primarySelectedItem);
     setLayoutMenu(null);
@@ -981,18 +1156,25 @@ export default function BoardPane({
             <HelpCircle size={15} />
           </IconButton>
           <div className="segmented board-filter" role="tablist" aria-label={t("board.source")}>
-            {BOARD_TABS.map(([value, label]) => (
-              <button
-                aria-selected={activeTab === value}
-                className={activeTab === value ? "active" : ""}
-                role="tab"
-                type="button"
-                key={value}
-                onClick={() => setActiveTab(value)}
-              >
-                {value === "work" ? t("common.work") : t("common.output", {}, label)}
-              </button>
-            ))}
+            {BOARD_TABS.map(([value, label]) => {
+              const active = activeTab === value;
+              const outputDrop = value === "output" && outputDropTarget === "tab";
+
+              return (
+                <button
+                  aria-selected={active}
+                  className={`${active ? "active" : ""}${outputDrop ? " drop-target" : ""}`}
+                  role="tab"
+                  type="button"
+                  key={value}
+                  onClick={() => setActiveTab(value)}
+                  onDragOver={value === "output" ? handleOutputTabDragOver : undefined}
+                  onDrop={value === "output" ? handleOutputTabDrop : undefined}
+                >
+                  {value === "work" ? t("common.work") : t("common.output", {}, label)}
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -1003,15 +1185,22 @@ export default function BoardPane({
           focusedAssetId={focusedWorkAsset?.assetId}
           focusRequestId={focusedWorkAsset?.requestId}
           onReferenceAsset={onReferenceAsset}
+          onCopyToOutput={copyWorkAssetToOutput}
+          onDragStart={startWorkAssetDrag}
+          onDragEnd={endWorkAssetDrag}
           onReveal={onReveal}
           onCopyPath={onCopyPath}
+          copyingAssetId={copyingAssetId}
           t={t}
         />
       ) : (
         <>
           <div
-            className={`board-shell ${isPanning ? "panning" : ""} ${effectiveToolMode === "select" ? "selecting" : "pan-tool"}`}
+            className={`board-shell ${isPanning ? "panning" : ""} ${effectiveToolMode === "select" ? "selecting" : "pan-tool"} ${outputDropTarget === "canvas" ? "drop-target" : ""} ${copyingAssetId ? "copying-output" : ""}`}
             ref={viewportRef}
+            onDragOver={handleOutputCanvasDragOver}
+            onDragLeave={handleOutputCanvasDragLeave}
+            onDrop={handleOutputCanvasDrop}
           >
             <div
               className="board-canvas"
@@ -1038,6 +1227,9 @@ export default function BoardPane({
 
               <div className="board-overlay">
                 <div className="board-group-title">{t("common.output")}</div>
+                {outputDropTarget === "canvas" ? (
+                  <div className="board-drop-hint">{t("board.drop_to_output")}</div>
+                ) : null}
                 {selectedItems.map((item) => {
                   const asset = assets.find((candidate) => candidate.id === item.asset_id) || { ...item, id: item.asset_id };
 
@@ -1211,8 +1403,12 @@ function WorkAssetList({
   focusedAssetId,
   focusRequestId,
   onReferenceAsset,
+  onCopyToOutput,
+  onDragStart,
+  onDragEnd,
   onReveal,
   onCopyPath,
+  copyingAssetId,
   t = defaultT,
 }) {
   const focusedRowRef = useRef(null);
@@ -1242,14 +1438,18 @@ function WorkAssetList({
         <div className="work-asset-list" role="list" aria-label={t("board.work_images")}>
           {assets.map((asset) => {
             const focused = focusedAssetId === asset.id;
+            const copying = copyingAssetId === asset.id;
 
             return (
               <div
-                className={`work-asset-row${focused ? " focused" : ""}`}
+                className={`work-asset-row${focused ? " focused" : ""}${copying ? " copying" : ""}`}
+                draggable={!copying}
                 role="listitem"
                 key={asset.id}
                 ref={focused ? focusedRowRef : null}
                 tabIndex={focused ? 0 : -1}
+                onDragStart={(event) => onDragStart?.(asset, event)}
+                onDragEnd={onDragEnd}
               >
                 <button
                   className="work-asset-main"
@@ -1266,6 +1466,13 @@ function WorkAssetList({
                   </span>
                 </button>
                 <div className="work-asset-actions">
+                  <IconButton
+                    label={t("board.copy_to_output", { name: asset.file_name })}
+                    onClick={() => onCopyToOutput?.(asset.id)}
+                    disabled={copying}
+                  >
+                    <Upload size={15} />
+                  </IconButton>
                   <IconButton label={t("board.reference_file", { name: asset.file_name })} onClick={() => onReferenceAsset(asset.id)}>
                     <Paperclip size={15} />
                   </IconButton>
@@ -1714,6 +1921,14 @@ function isWorkAsset(asset) {
     typeof asset?.relative_path === "string" &&
     asset.relative_path.startsWith("work/")
   );
+}
+
+function isSupportedOutputDropFile(file) {
+  if (!file) return false;
+  if (OUTPUT_DROP_IMAGE_TYPES.has(file.type)) return true;
+
+  const name = String(file.name || "").toLowerCase();
+  return OUTPUT_DROP_IMAGE_EXTENSIONS.some((extension) => name.endsWith(extension));
 }
 
 function assetDimensions(asset) {

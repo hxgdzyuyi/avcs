@@ -118,6 +118,60 @@ defmodule Avcs.Assets do
     end
   end
 
+  def upload_image_to_output(project, %Plug.Upload{} = upload, opts \\ []) do
+    with :ok <- ensure_supported_extension(upload.filename),
+         {:ok, hash} <- file_hash(upload.path),
+         {:ok, placement} <- output_drop_placement(opts) do
+      case get_asset_by_hash(project, hash) do
+        {:ok, nil} ->
+          target_dir = Avcs.Projects.output_dir(project)
+          target_path = Path.join(target_dir, target_file_name(hash, upload.filename))
+
+          with :ok <- mkdir_p(target_dir),
+               :ok <- copy_file_if_missing(upload.path, target_path),
+               {:ok, asset} <-
+                 upsert_asset(
+                   project,
+                   target_path,
+                   source: "output_upload",
+                   board_x: Map.get(placement, :x),
+                   board_y: Map.get(placement, :y)
+                 ),
+               {:ok, board_item} <- output_board_item_for_asset(project, asset["id"]) do
+            {:ok, %{asset: asset, board_item: board_item}}
+          end
+
+        {:ok, %{"source" => "mask"}} ->
+          {:error, :asset_not_copyable}
+
+        {:ok, asset} ->
+          upload_existing_asset_to_output(project, asset, upload, placement)
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  def copy_to_output(project, asset_id, opts \\ []) do
+    with {:ok, asset} <- get_copyable_asset(project, asset_id),
+         {:ok, placement} <- output_drop_placement(opts),
+         {:ok, source_path, relative_path} <- copyable_asset_path(project, asset) do
+      cond do
+        output_relative_path?(relative_path) ->
+          ensure_copied_output_asset(project, asset, nil, placement)
+
+        work_relative_path?(relative_path) ->
+          with {:ok, target_path} <- copy_asset_file_to_output(project, asset, source_path) do
+            ensure_copied_output_asset(project, asset, target_path, placement)
+          end
+
+        true ->
+          {:error, :asset_not_copyable}
+      end
+    end
+  end
+
   def create_mask_image(project, base_asset_id, %Plug.Upload{} = upload, opts \\ []) do
     with {:ok, base_asset} <- require_asset(project, base_asset_id),
          :ok <- ensure_png_file(upload.path),
@@ -185,6 +239,7 @@ defmodule Avcs.Assets do
           turn_id = Keyword.get(opts, :turn_id)
           item_id = Keyword.get(opts, :item_id)
           prompt = Keyword.get(opts, :prompt)
+          placement = keyword_output_board_opts(opts)
           file_name = Path.basename(file_path)
           extension = file_path |> Path.extname() |> String.downcase() |> String.trim_leading(".")
           mime_type = mime_type(file_path)
@@ -246,7 +301,7 @@ defmodule Avcs.Assets do
             end
 
           link_asset(db, asset["id"], thread_id, turn_id, item_id, source, now)
-          ensure_output_board_item(db, asset, source, thread_id, turn_id, item_id, now)
+          ensure_output_board_item(db, asset, source, thread_id, turn_id, item_id, now, placement)
           asset
         end)
       end)
@@ -352,6 +407,238 @@ defmodule Avcs.Assets do
         %{asset_id: asset_id}
       end)
     end)
+  end
+
+  defp get_copyable_asset(project, id) when is_binary(id) and id != "" do
+    case get_asset(project, id) do
+      {:ok, nil} -> {:error, :not_found}
+      {:ok, %{"source" => "mask"}} -> {:error, :asset_not_copyable}
+      {:ok, asset} -> {:ok, asset}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp get_copyable_asset(_project, _id), do: {:error, :not_found}
+
+  defp output_drop_placement(opts) do
+    x = Keyword.get(opts, :x)
+    y = Keyword.get(opts, :y)
+
+    cond do
+      is_nil(x) and is_nil(y) ->
+        {:ok, %{}}
+
+      not is_nil(x) and not is_nil(y) ->
+        with {:ok, x} <- parse_placement_number(x),
+             {:ok, y} <- parse_placement_number(y) do
+          {:ok, %{x: x, y: y}}
+        else
+          :error -> {:error, :invalid_output_placement}
+        end
+
+      true ->
+        {:error, :invalid_output_placement}
+    end
+  end
+
+  defp parse_placement_number(value) when is_integer(value), do: {:ok, value * 1.0}
+  defp parse_placement_number(value) when is_float(value), do: {:ok, value}
+
+  defp parse_placement_number(value) when is_binary(value) do
+    value = String.trim(value)
+
+    case Float.parse(value) do
+      {number, ""} -> {:ok, number}
+      _other -> :error
+    end
+  end
+
+  defp parse_placement_number(_value), do: :error
+
+  defp copyable_asset_path(project, %{"file_path" => file_path})
+       when is_binary(file_path) and file_path != "" do
+    path = Path.expand(file_path)
+
+    with {:ok, relative_path} <- Avcs.Projects.relative_to_project(project, path),
+         :ok <- ensure_supported_extension(path) do
+      cond do
+        String.starts_with?(relative_path, ".avcs/") ->
+          {:error, :asset_not_copyable}
+
+        File.exists?(path) and File.regular?(path) ->
+          {:ok, path, relative_path}
+
+        File.exists?(path) ->
+          {:error, :asset_not_copyable}
+
+        true ->
+          {:error, :asset_file_missing}
+      end
+    else
+      {:error, :outside_project} -> {:error, :asset_not_copyable}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp copyable_asset_path(_project, _asset), do: {:error, :asset_file_missing}
+
+  defp output_relative_path?("output/" <> _rest), do: true
+  defp output_relative_path?(_relative_path), do: false
+
+  defp work_relative_path?("work/" <> _rest), do: true
+  defp work_relative_path?(_relative_path), do: false
+
+  defp copy_asset_file_to_output(project, asset, source_path) do
+    target_dir = Avcs.Projects.output_dir(project)
+    target_path = Path.join(target_dir, output_file_name(asset, source_path))
+
+    with :ok <- mkdir_p(target_dir),
+         :ok <- copy_file_if_missing(source_path, target_path) do
+      {:ok, target_path}
+    end
+  end
+
+  defp upload_existing_asset_to_output(project, asset, upload, placement) do
+    case copyable_existing_asset_location(project, asset) do
+      {:ok, :output} ->
+        ensure_copied_output_asset(project, asset, nil, placement)
+
+      {:ok, :work} ->
+        upload_asset =
+          asset
+          |> Map.put("file_name", upload.filename)
+          |> Map.put("hash", asset["hash"])
+
+        with {:ok, target_path} <- copy_asset_file_to_output(project, upload_asset, upload.path) do
+          ensure_copied_output_asset(project, asset, target_path, placement)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp copyable_existing_asset_location(project, asset) do
+    with {:ok, _source_path, relative_path} <- copyable_asset_path(project, asset) do
+      cond do
+        output_relative_path?(relative_path) -> {:ok, :output}
+        work_relative_path?(relative_path) -> {:ok, :work}
+        true -> {:error, :asset_not_copyable}
+      end
+    end
+  end
+
+  defp mkdir_p(path) do
+    case File.mkdir_p(path) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Cannot create output directory: #{inspect(reason)}"}
+    end
+  end
+
+  defp copy_file_if_missing(source_path, target_path) do
+    if File.exists?(target_path) do
+      :ok
+    else
+      case File.cp(source_path, target_path) do
+        :ok -> :ok
+        {:error, reason} -> {:error, "Cannot copy image to output: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp output_file_name(%{"hash" => hash, "file_name" => file_name}, source_path)
+       when is_binary(hash) and hash != "" do
+    prefix = String.slice(hash, 0, 16) <> "-"
+    base = sanitized_file_name(file_name || source_path)
+
+    if String.starts_with?(base, prefix) do
+      base
+    else
+      prefix <> base
+    end
+  end
+
+  defp output_file_name(_asset, source_path), do: sanitized_file_name(source_path)
+
+  defp sanitized_file_name(path_or_name) do
+    path_or_name
+    |> to_string()
+    |> Path.basename()
+    |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+    |> String.trim("-")
+    |> case do
+      "" -> "image"
+      value -> value
+    end
+  end
+
+  defp ensure_copied_output_asset(project, asset, target_path, placement) do
+    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+      SQLite.transaction!(db, fn ->
+        now = Avcs.Time.now_iso()
+        source = if target_path, do: "output_copy", else: asset["source"]
+        asset = update_copied_output_asset!(db, project, asset, target_path, source, now)
+
+        board_item =
+          ensure_output_board_item(
+            db,
+            asset,
+            asset["source"],
+            asset["thread_id"],
+            asset["turn_id"],
+            asset["item_id"],
+            now,
+            placement
+          )
+
+        %{asset: asset, board_item: board_item}
+      end)
+    end)
+  end
+
+  defp update_copied_output_asset!(_db, _project, asset, nil, _source, _now), do: asset
+
+  defp update_copied_output_asset!(db, project, asset, target_path, source, now) do
+    {:ok, relative_path} = Avcs.Projects.relative_to_project(project, target_path)
+    {:ok, stat} = File.stat(target_path)
+
+    file_name = Path.basename(target_path)
+    extension = target_path |> Path.extname() |> String.downcase() |> String.trim_leading(".")
+    mime_type = mime_type(target_path)
+    {width, height} = dimensions(target_path)
+
+    SQLite.run!(
+      db,
+      """
+      UPDATE assets
+      SET file_path = ?,
+          relative_path = ?,
+          file_name = ?,
+          file_type = ?,
+          mime_type = ?,
+          width = ?,
+          height = ?,
+          size_bytes = ?,
+          source = ?,
+          updated_at = ?
+      WHERE id = ?
+      """,
+      [
+        target_path,
+        relative_path,
+        file_name,
+        extension,
+        mime_type,
+        width,
+        height,
+        stat.size,
+        source,
+        now,
+        asset["id"]
+      ]
+    )
+
+    SQLite.one!(db, "SELECT * FROM assets WHERE id = ?", [asset["id"]])
   end
 
   defp ensure_supported_image(path) do
@@ -494,6 +781,15 @@ defmodule Avcs.Assets do
     end)
   end
 
+  defp keyword_output_board_opts(opts) do
+    %{}
+    |> put_optional_board_opt(:x, Keyword.get(opts, :board_x))
+    |> put_optional_board_opt(:y, Keyword.get(opts, :board_y))
+  end
+
+  defp put_optional_board_opt(opts, _key, nil), do: opts
+  defp put_optional_board_opt(opts, key, value), do: Map.put(opts, key, value)
+
   defp link_asset(_db, _asset_id, nil, nil, nil, _source, _now), do: :ok
 
   defp link_asset(db, asset_id, thread_id, turn_id, item_id, source, now) do
@@ -535,13 +831,42 @@ defmodule Avcs.Assets do
     end
   end
 
-  defp ensure_output_board_item(db, asset, source, thread_id, turn_id, item_id, now) do
+  defp ensure_output_board_item(db, asset, source, thread_id, turn_id, item_id, now, opts \\ %{}) do
     if output_asset?(asset) do
-      ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now)
+      ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now, opts)
     end
   end
 
-  defp ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now) do
+  defp output_board_item_for_asset(project, asset_id) do
+    SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
+      SQLite.one!(
+        db,
+        """
+        SELECT board_items.*,
+               assets.file_name,
+               assets.relative_path,
+               assets.mime_type,
+               assets.width AS asset_width,
+               assets.height AS asset_height,
+               assets.source AS asset_source
+        FROM board_items
+        JOIN assets ON assets.id = board_items.asset_id
+        WHERE board_items.asset_id = ?
+          AND assets.relative_path LIKE 'output/%'
+          AND board_items.invalidated_at IS NULL
+        LIMIT 1
+        """,
+        [asset_id]
+      )
+    end)
+    |> case do
+      {:ok, nil} -> {:error, :board_item_not_found}
+      {:ok, board_item} -> {:ok, board_item}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_board_item(db, asset, source, thread_id, turn_id, item_id, now, opts) do
     existing =
       SQLite.one!(db, "SELECT * FROM board_items WHERE asset_id = ? LIMIT 1", [asset["id"]])
 
@@ -553,7 +878,8 @@ defmodule Avcs.Assets do
       display_height =
         if width > 0, do: display_width * height / width, else: 240
 
-      placement = new_board_item_placement(db, turn_id, display_width)
+      placement = new_board_item_placement(db, turn_id, display_width, opts)
+      id = Ecto.UUID.generate()
 
       SQLite.run!(
         db,
@@ -565,7 +891,7 @@ defmodule Avcs.Assets do
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
-          Ecto.UUID.generate(),
+          id,
           asset["id"],
           thread_id,
           turn_id,
@@ -580,6 +906,8 @@ defmodule Avcs.Assets do
           now
         ]
       )
+
+      SQLite.one!(db, "SELECT * FROM board_items WHERE id = ?", [id])
     else
       if existing["invalidated_at"] do
         SQLite.run!(
@@ -589,22 +917,35 @@ defmodule Avcs.Assets do
           SET thread_id = ?,
               turn_id = ?,
               item_id = ?,
+              x = COALESCE(?, x),
+              y = COALESCE(?, y),
               source = ?,
               invalidated_at = NULL,
               invalidated_by_item_id = NULL,
               updated_at = ?
           WHERE id = ?
           """,
-          [thread_id, turn_id, item_id, source, now, existing["id"]]
+          [
+            thread_id,
+            turn_id,
+            item_id,
+            Map.get(opts, :x),
+            Map.get(opts, :y),
+            source,
+            now,
+            existing["id"]
+          ]
         )
       end
+
+      SQLite.one!(db, "SELECT * FROM board_items WHERE id = ?", [existing["id"]])
     end
   end
 
   defp output_asset?(%{"relative_path" => "output/" <> _rest}), do: true
   defp output_asset?(_asset), do: false
 
-  defp new_board_item_placement(db, turn_id, display_width) do
+  defp new_board_item_placement(db, turn_id, display_width, opts) do
     items = active_output_board_items(db)
     same_turn = if present_id?(turn_id), do: same_turn_items(items, turn_id), else: []
     z_index = next_board_z_index(items)
@@ -621,7 +962,11 @@ defmodule Avcs.Assets do
           new_group_position(items)
       end
 
-    %{x: x, y: y, z_index: z_index}
+    %{
+      x: Map.get(opts, :x, x),
+      y: Map.get(opts, :y, y),
+      z_index: z_index
+    }
   end
 
   defp active_output_board_items(db) do

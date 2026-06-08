@@ -185,14 +185,14 @@ defmodule Avcs.ProjectsTest do
 
     assert {:ok, data} =
              Avcs.SiteSettings.update_settings(%{
-               "image.default_ratio" => "16:9",
+               "image.default_ratio" => "3:1",
                "image.default_count" => 3,
                "projects.default_root" => "~/Desktop/Avcs",
                "assets.scan_on_open" => true,
                "ui.locale" => "zh-hans"
              })
 
-    assert data.settings["image.default_ratio"] == "16:9"
+    assert data.settings["image.default_ratio"] == "3:1"
     assert data.settings["image.default_count"] == 3
     assert data.settings["projects.default_root"] == Path.expand("~/Desktop/Avcs")
     assert data.settings["assets.scan_on_open"] == true
@@ -202,7 +202,7 @@ defmodule Avcs.ProjectsTest do
     assert item.is_default == false
     assert item.default_value == "auto"
 
-    assert {:ok, "16:9"} = Avcs.SiteSettings.get_setting("image.default_ratio")
+    assert {:ok, "3:1"} = Avcs.SiteSettings.get_setting("image.default_ratio")
 
     assert {:error, {:unknown_site_setting, "turns.default_model"}} =
              Avcs.SiteSettings.update_settings(%{"turns.default_model" => "gpt-5"})

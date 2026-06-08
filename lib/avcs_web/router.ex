@@ -35,8 +35,10 @@ defmodule AvcsWeb.Router do
     get "/assets/:id/preview", AssetController, :preview
     post "/assets/import", AssetController, :import
     post "/assets/upload", AssetController, :upload
+    post "/assets/upload_to_output", AssetController, :upload_to_output
     post "/assets/mask", AssetController, :mask
     post "/assets/scan", AssetController, :scan
+    post "/assets/:id/copy_to_output", AssetController, :copy_to_output
     post "/assets/:id/reveal", AssetController, :reveal
     get "/assets/:id/path", AssetController, :path
     delete "/assets/:id", AssetController, :delete

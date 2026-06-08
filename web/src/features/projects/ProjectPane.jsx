@@ -401,12 +401,12 @@ export default function ProjectPane({
   return (
     <aside className="project-pane" ref={paneRef}>
       <div className="sidebar-header">
-        <strong>{t("common.project")}</strong>
+        <div className="sidebar-brand" aria-label="Avcs">
+          <img className="sidebar-brand-logo" src="/favicon.png" alt="" aria-hidden="true" />
+          <strong className="sidebar-brand-title">Avcs</strong>
+        </div>
         <div className="sidebar-header-actions">
           <span className={`connection-dot ${connectionState}`} title={`WebSocket ${connectionState}`} />
-          <IconButton label={t("project.global_settings")} className="ghost" onClick={onOpenSettings}>
-            <Settings size={16} />
-          </IconButton>
           <div className="project-menu-wrap" data-project-menu-root>
             <IconButton
               label={t("project.add_or_create")}
@@ -732,20 +732,34 @@ export default function ProjectPane({
         )}
       </div>
 
-      <div className="project-status" role="status" aria-label={t("app.workspace_views")}>
-        <div className="project-status-item">
-          <span>{t("project.websocket")}</span>
-          <strong>{t(`connection.${connectionState}`, {}, connectionState)}</strong>
+      <div className="sidebar-footer">
+        <div className="project-status" role="status" aria-label={t("app.workspace_views")}>
+          <div className="project-status-item">
+            <span>{t("project.websocket")}</span>
+            <strong>{t(`connection.${connectionState}`, {}, connectionState)}</strong>
+          </div>
+          <div className="project-status-item">
+            <span>{t("common.agent")}</span>
+            <strong>
+              {agentRunning ? (
+                <ThinkingDots step={agentThinkingStep} />
+              ) : (
+                t("common.idle")
+              )}
+            </strong>
+          </div>
         </div>
-        <div className="project-status-item">
-          <span>{t("common.agent")}</span>
-          <strong>
-            {agentRunning ? (
-              <ThinkingDots step={agentThinkingStep} />
-            ) : (
-              t("common.idle")
-            )}
-          </strong>
+        <div className="sidebar-footer-actions">
+          <button
+            className="sidebar-settings-button"
+            type="button"
+            title={t("project.global_settings")}
+            aria-label={t("project.global_settings")}
+            onClick={onOpenSettings}
+          >
+            <Settings size={16} />
+            <span>{t("project.global_settings")}</span>
+          </button>
         </div>
       </div>
     </aside>

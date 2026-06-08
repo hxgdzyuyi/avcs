@@ -213,7 +213,7 @@ defmodule AvcsWeb.AvcsChannelTest do
       push(socket, "site_settings:update", %{
         "settings" => %{
           "agent.default_model" => "gpt-5",
-          "image.default_ratio" => "9:16",
+          "image.default_ratio" => "1:3",
           "image.default_count" => 2,
           "image.transparent_background" => true,
           "ui.locale" => "zh-hans"
@@ -226,7 +226,7 @@ defmodule AvcsWeb.AvcsChannelTest do
     }
 
     assert updated_settings["agent.default_model"] == "gpt-5"
-    assert updated_settings["image.default_ratio"] == "9:16"
+    assert updated_settings["image.default_ratio"] == "1:3"
     assert updated_settings["image.default_count"] == 2
     assert updated_settings["image.transparent_background"] == true
     assert updated_settings["ui.locale"] == "zh-hans"

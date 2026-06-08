@@ -89,20 +89,37 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 52px;
-  padding: 10px 12px 10px 14px;
+  flex: 0 0 $workspace-topbar-height;
+  height: $workspace-topbar-height;
+  padding: 0 12px 0 14px;
   border-bottom: 1px solid $soft-line;
 }
 
-.sidebar-header strong {
+.sidebar-brand {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-brand-logo {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+}
+
+.sidebar-brand-title {
   min-width: 0;
   color: $ink;
   font-size: 14px;
   font-weight: 650;
+  line-height: 1;
 }
 
 .sidebar-header-actions {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 4px;
 }
@@ -465,36 +482,76 @@
   color: $ink;
 }
 
+.sidebar-footer {
+  display: grid;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding: 10px;
+  border-top: 1px solid $soft-line;
+}
+
 .project-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-top: auto;
-  padding: 12px 14px 16px;
-  border-top: 1px solid $soft-line;
+  gap: 10px;
+  min-width: 0;
+  padding: 0 2px;
 }
 
 .project-status-item {
   display: flex;
   align-items: center;
+  flex: 1 1 0;
+  justify-content: flex-start;
   min-width: 0;
-  gap: 6px;
+  gap: 4px;
   color: $muted;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .project-status-item:last-child {
-  margin-left: auto;
+  justify-content: flex-end;
 }
 
 .project-status-item strong {
   display: inline-flex;
   align-items: center;
   justify-content: flex-end;
-  min-width: 40px;
+  min-width: 0;
   color: $ink;
   font-weight: 600;
+}
+
+.sidebar-footer-actions {
+  display: block;
+}
+
+.sidebar-settings-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+  gap: 8px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: $ink;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: left;
+}
+
+.sidebar-settings-button:hover {
+  background: $panel;
+}
+
+.sidebar-settings-button svg {
+  flex: 0 0 auto;
+  color: $muted;
 }
 
 .agent-thinking-dots {
@@ -3050,14 +3107,26 @@
 
 .board-controls {
   display: flex;
+  align-items: center;
   gap: 8px;
   justify-content: flex-end;
   min-width: 0;
 }
 
+.board-pane .pane-header > div:first-child {
+  display: grid;
+  grid-template-columns: auto minmax(0, max-content);
+  align-items: baseline;
+  column-gap: 8px;
+}
+
+.board-pane .pane-header .eyebrow {
+  grid-column: 1 / -1;
+}
+
 .board-count {
-  display: block;
-  margin-top: 2px;
+  display: inline-flex;
+  margin-top: 0;
   color: $muted;
   font-size: 12px;
 }
@@ -3089,6 +3158,12 @@
   background: $panel;
 }
 
+.segmented button.drop-target {
+  color: $selection;
+  background: $selection-weak;
+  box-shadow: inset 0 0 0 1px rgba(63, 95, 255, 0.25);
+}
+
 .board-filter {
   max-width: 100%;
   overflow: auto;
@@ -3117,11 +3192,17 @@
   border: 1px solid $line;
   border-radius: 8px;
   background: #fff;
+  cursor: grab;
 }
 
 .work-asset-row.focused {
   border-color: $selection;
   box-shadow: 0 0 0 2px $selection-weak;
+}
+
+.work-asset-row.copying {
+  cursor: progress;
+  opacity: 0.7;
 }
 
 .work-asset-main {
@@ -3228,6 +3309,14 @@
   cursor: grabbing;
 }
 
+.board-shell.drop-target {
+  box-shadow: inset 0 0 0 2px $selection;
+}
+
+.board-shell.copying-output {
+  cursor: progress;
+}
+
 .board-pane {
   position: relative;
 }
@@ -3265,6 +3354,29 @@
   font-size: 12px;
   font-weight: 700;
   pointer-events: none;
+}
+
+.board-drop-hint {
+  position: absolute;
+  left: 50%;
+  top: 26px;
+  z-index: 80;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  max-width: calc(100% - 48px);
+  padding: 0 10px;
+  border: 1px solid $selection;
+  border-radius: 8px;
+  color: $selection;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: $shadow;
+  font-size: 12px;
+  font-weight: 650;
+  transform: translateX(-50%);
+  pointer-events: none;
+  white-space: nowrap;
 }
 
 .board-object {
@@ -3844,8 +3956,10 @@
 }
 
 @media (max-width: 760px) {
+  .sidebar-header,
   .pane-header {
-    padding: 12px;
+    padding-right: 12px;
+    padding-left: 12px;
   }
 
   .message-list {

@@ -29,6 +29,36 @@ defmodule AvcsWeb.AssetController do
     end)
   end
 
+  def upload_to_output(conn, %{"file" => upload} = params) do
+    with_project(conn, fn conn, project ->
+      opts = [x: params["x"], y: params["y"]]
+
+      case Avcs.Assets.upload_image_to_output(project, upload, opts) do
+        {:ok, result} ->
+          broadcast_assets(project, result.asset)
+          ApiResponse.ok(conn, result)
+
+        {:error, :asset_not_copyable} ->
+          ApiResponse.error(conn, 422, "asset_not_copyable", "Asset cannot be copied to Output")
+
+        {:error, :invalid_output_placement} ->
+          ApiResponse.error(
+            conn,
+            422,
+            "asset_upload_to_output_failed",
+            "Drop position is invalid"
+          )
+
+        {:error, reason} ->
+          ApiResponse.error(conn, 422, "asset_upload_to_output_failed", to_string(reason))
+      end
+    end)
+  end
+
+  def upload_to_output(conn, _params) do
+    ApiResponse.error(conn, 422, "asset_upload_to_output_failed", "Image file is required")
+  end
+
   def mask(conn, %{"file" => upload, "base_asset_id" => base_asset_id}) do
     with_project(conn, fn conn, project ->
       case Avcs.Assets.create_mask_image(project, base_asset_id, upload) do
@@ -55,6 +85,33 @@ defmodule AvcsWeb.AssetController do
 
         {:error, reason} ->
           ApiResponse.error(conn, 422, "asset_scan_failed", to_string(reason))
+      end
+    end)
+  end
+
+  def copy_to_output(conn, %{"id" => id} = params) do
+    with_project(conn, fn conn, project ->
+      opts = [x: params["x"], y: params["y"]]
+
+      case Avcs.Assets.copy_to_output(project, id, opts) do
+        {:ok, result} ->
+          broadcast_assets(project, result.asset)
+          ApiResponse.ok(conn, result)
+
+        {:error, :not_found} ->
+          ApiResponse.error(conn, 404, "asset_not_found", "Asset was not found")
+
+        {:error, :asset_file_missing} ->
+          ApiResponse.error(conn, 404, "asset_file_missing", "Asset file is missing")
+
+        {:error, :asset_not_copyable} ->
+          ApiResponse.error(conn, 422, "asset_not_copyable", "Asset cannot be copied to Output")
+
+        {:error, :invalid_output_placement} ->
+          ApiResponse.error(conn, 422, "asset_copy_to_output_failed", "Drop position is invalid")
+
+        {:error, reason} ->
+          ApiResponse.error(conn, 422, "asset_copy_to_output_failed", to_string(reason))
       end
     end)
   end

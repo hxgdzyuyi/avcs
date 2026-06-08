@@ -45,11 +45,31 @@ export function uploadAsset(file) {
   return request("/api/assets/upload", { method: "POST", body });
 }
 
+export function uploadOutputAsset(file, placement = {}) {
+  const body = new FormData();
+  body.append("file", file);
+
+  if (Number.isFinite(placement?.x) && Number.isFinite(placement?.y)) {
+    body.append("x", String(placement.x));
+    body.append("y", String(placement.y));
+  }
+
+  return request("/api/assets/upload_to_output", { method: "POST", body });
+}
+
 export function uploadMaskAsset(baseAssetId, file) {
   const body = new FormData();
   body.append("base_asset_id", baseAssetId);
   body.append("file", file);
   return request("/api/assets/mask", { method: "POST", body });
+}
+
+export function copyAssetToOutput(id, placement = {}) {
+  return request(`/api/assets/${id}/copy_to_output`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(placement || {}),
+  });
 }
 
 export function revealAsset(id) {
