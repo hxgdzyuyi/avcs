@@ -68,7 +68,9 @@ defmodule Avcs.Agent.RunnerTest do
        }}
     end
 
-    def read_thread("codex-thread-1", include_turns: true) do
+    def read_thread("codex-thread-1", opts) do
+      true = Keyword.get(opts, :include_turns)
+
       {:ok,
        %{
          "id" => "codex-thread-1",

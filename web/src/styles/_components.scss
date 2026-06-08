@@ -795,6 +795,12 @@
   background: $panel;
 }
 
+.tracing-filter-reset.active {
+  border-color: $selection;
+  color: $selection;
+  background: $selection-weak;
+}
+
 .tracing-tree {
   display: grid;
   gap: 10px;

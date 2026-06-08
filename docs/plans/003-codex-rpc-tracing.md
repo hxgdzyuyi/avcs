@@ -1,6 +1,6 @@
 ---
 git_commit_message: 'feat: trace codex rpc messages'
-plan_state: planned
+plan_state: finished
 ---
 # 003 Codex RPC Tracing
 

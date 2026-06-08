@@ -38,7 +38,7 @@ defmodule Avcs.Agent.CodexAppServerPool do
       text: text,
       reference_paths: reference_paths,
       on_event: on_event,
-      opts: opts,
+      opts: put_trace_opts(opts, project, avcs_thread_id, avcs_turn_id, codex_thread_id),
       queued?: false
     }
 
@@ -519,6 +519,25 @@ defmodule Avcs.Agent.CodexAppServerPool do
     exception -> {:error, Exception.message(exception)}
   catch
     :exit, reason -> {:error, "Codex app-server worker exited: #{inspect(reason)}"}
+  end
+
+  defp put_trace_opts(opts, project, avcs_thread_id, avcs_turn_id, codex_thread_id)
+       when is_map(opts) do
+    opts
+    |> Map.put(:project, project)
+    |> Map.put(:avcs_thread_id, avcs_thread_id)
+    |> Map.put(:avcs_turn_id, avcs_turn_id)
+    |> Map.put(:codex_thread_id, clean_string(codex_thread_id))
+  end
+
+  defp put_trace_opts(opts, project, avcs_thread_id, avcs_turn_id, codex_thread_id) do
+    List.wrap(opts) ++
+      [
+        project: project,
+        avcs_thread_id: avcs_thread_id,
+        avcs_turn_id: avcs_turn_id,
+        codex_thread_id: clean_string(codex_thread_id)
+      ]
   end
 
   defp wrap_run_event(request, worker, pool) do

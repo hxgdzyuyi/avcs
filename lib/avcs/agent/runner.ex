@@ -41,6 +41,7 @@ defmodule Avcs.Agent.Runner do
              codex_client,
              project,
              edited["turn"]["thread_id"],
+             edited["turn"]["id"],
              edited["rollback_turn_count"],
              rerun_settings
            ),
@@ -103,7 +104,7 @@ defmodule Avcs.Agent.Runner do
          {:ok, %{"codex_thread_id" => codex_thread_id} = thread}
          when is_binary(codex_thread_id) and codex_thread_id != "" <-
            repairable_thread(project, thread),
-         {:ok, codex_thread} <- read_codex_thread(codex_thread_id),
+         {:ok, codex_thread} <- read_codex_thread(project, thread_id, codex_thread_id),
          {:ok, repair} <- reconcile_codex_thread(project, thread, codex_thread) do
       broadcast_lists(project, thread_id)
       {:ok, repair}
@@ -266,6 +267,7 @@ defmodule Avcs.Agent.Runner do
          _codex_client,
          _project,
          _thread_id,
+         _turn_id,
          rollback_count,
          _settings
        )
@@ -273,18 +275,27 @@ defmodule Avcs.Agent.Runner do
     :ok
   end
 
-  defp prepare_codex_thread_for_rerun(codex_client, project, thread_id, rollback_count, settings) do
+  defp prepare_codex_thread_for_rerun(
+         codex_client,
+         project,
+         thread_id,
+         turn_id,
+         rollback_count,
+         settings
+       ) do
+    trace_opts = codex_thread_trace_opts(project, thread_id, turn_id, settings)
+
     with {:ok, %{"codex_thread_id" => codex_thread_id}}
          when is_binary(codex_thread_id) and
                 codex_thread_id != "" <-
            Avcs.Threads.get_thread(project, thread_id),
          true <- module_exports?(codex_client, :fork_thread, 2),
          true <- module_exports?(codex_client, :rollback_thread, 3),
-         {:ok, forked_thread} <- codex_client.fork_thread(codex_thread_id, Map.to_list(settings)),
+         {:ok, forked_thread} <- codex_client.fork_thread(codex_thread_id, trace_opts),
          forked_thread_id when is_binary(forked_thread_id) and forked_thread_id != "" <-
            forked_thread["id"],
          {:ok, rolled_back_thread} <-
-           codex_client.rollback_thread(forked_thread_id, rollback_count, []),
+           codex_client.rollback_thread(forked_thread_id, rollback_count, trace_opts),
          rolled_back_thread_id
          when is_binary(rolled_back_thread_id) and rolled_back_thread_id != "" <-
            rolled_back_thread["id"] || forked_thread_id,
@@ -305,6 +316,20 @@ defmodule Avcs.Agent.Runner do
         fallback_to_new_codex_thread(project, thread_id, reason)
     end
   end
+
+  defp codex_thread_trace_opts(project, thread_id, turn_id, settings) do
+    settings
+    |> map_to_option_list()
+    |> Kernel.++(
+      project: project,
+      avcs_thread_id: thread_id,
+      avcs_turn_id: turn_id
+    )
+  end
+
+  defp map_to_option_list(value) when is_map(value), do: Map.to_list(value)
+  defp map_to_option_list(value) when is_list(value), do: value
+  defp map_to_option_list(_value), do: []
 
   defp fallback_to_new_codex_thread(project, thread_id, reason) do
     trace_event(project, %{
@@ -1294,11 +1319,15 @@ defmodule Avcs.Agent.Runner do
     _error -> false
   end
 
-  defp read_codex_thread(codex_thread_id) do
+  defp read_codex_thread(project, thread_id, codex_thread_id) do
     codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
 
     if module_exports?(codex_client, :read_thread, 2) do
-      codex_client.read_thread(codex_thread_id, include_turns: true)
+      codex_client.read_thread(codex_thread_id,
+        include_turns: true,
+        project: project,
+        avcs_thread_id: thread_id
+      )
     else
       {:error, :thread_read_unsupported}
     end

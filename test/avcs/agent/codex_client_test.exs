@@ -137,6 +137,126 @@ defmodule Avcs.Agent.CodexClientTest do
              |> Enum.uniq()
   end
 
+  test "run_turn records outbound and inbound Codex RPC trace events" do
+    %{project: project, thread: thread, turn: turn} = open_test_project_with_turn()
+    image_path = Path.join(Avcs.Projects.work_dir(project), "reference.png")
+    File.write!(image_path, "fake")
+
+    assert {:ok, result} =
+             Avcs.Agent.CodexClient.run_turn(
+               project,
+               nil,
+               "Use the reference",
+               [image_path],
+               fn _event -> :ok end,
+               %{avcs_thread_id: thread["id"], avcs_turn_id: turn["id"]}
+             )
+
+    assert result.codex_thread_id == "thread-1"
+
+    rpc_events =
+      project
+      |> trace_events!(thread["id"])
+      |> Enum.filter(&(&1["scope"] == "codex_rpc"))
+
+    assert thread_start =
+             Enum.find(
+               rpc_events,
+               &(&1["event_name"] == "request_sent" and
+                   get_in(&1, ["payload", "method"]) == "thread/start")
+             )
+
+    assert thread_start["status"] == "sent"
+    assert get_in(thread_start, ["payload", "direction"]) == "outbound"
+
+    assert turn_start =
+             Enum.find(
+               rpc_events,
+               &(&1["event_name"] == "request_sent" and
+                   get_in(&1, ["payload", "method"]) == "turn/start")
+             )
+
+    assert get_in(turn_start, ["raw", "params", "input"])
+           |> Enum.any?(&(&1["type"] == "localImage" and &1["path"] == image_path))
+
+    refute Jason.encode!(turn_start["raw"]) =~ "asset_id"
+
+    assert turn_start_response =
+             Enum.find(
+               rpc_events,
+               &(&1["event_name"] == "response_received" and
+                   get_in(&1, ["payload", "rpc_id"]) == get_in(turn_start, ["payload", "rpc_id"]))
+             )
+
+    assert turn_start_response["status"] == "ok"
+    assert get_in(turn_start_response, ["payload", "method"]) == "turn/start"
+
+    assert Enum.any?(
+             rpc_events,
+             &(&1["event_name"] == "notification_received" and
+                 get_in(&1, ["payload", "method"]) == "turn/completed")
+           )
+
+    assert Enum.any?(
+             trace_events!(project, thread["id"]),
+             &(&1["event_name"] == "turn_created" and &1["scope"] == "turn")
+           )
+  end
+
+  test "Codex error responses are traced with method and error summary" do
+    System.put_env("AVCS_FAKE_CODEX_MODE", "turn_start_error")
+    %{project: project, thread: thread, turn: turn} = open_test_project_with_turn()
+
+    assert {:error, "turn start rejected"} =
+             Avcs.Agent.CodexClient.run_turn(
+               project,
+               nil,
+               "Reject this",
+               [],
+               fn _event -> :ok end,
+               %{avcs_thread_id: thread["id"], avcs_turn_id: turn["id"]}
+             )
+
+    assert error_event =
+             project
+             |> trace_events!(thread["id"])
+             |> Enum.find(
+               &(&1["scope"] == "codex_rpc" and
+                   &1["event_name"] == "response_received" and
+                   &1["status"] == "error" and
+                   get_in(&1, ["payload", "method"]) == "turn/start")
+             )
+
+    assert get_in(error_event, ["payload", "error_message"]) == "turn start rejected"
+  end
+
+  test "undecodable Codex stdout lines are traced with a bounded raw summary" do
+    System.put_env("AVCS_FAKE_CODEX_MODE", "decode_error_then_complete")
+    %{project: project, thread: thread, turn: turn} = open_test_project_with_turn()
+
+    assert {:ok, result} =
+             Avcs.Agent.CodexClient.run_turn(
+               project,
+               nil,
+               "Recover after bad JSON",
+               [],
+               fn _event -> :ok end,
+               %{avcs_thread_id: thread["id"], avcs_turn_id: turn["id"]}
+             )
+
+    assert result.assistant_text == "after-bad-json"
+
+    assert decode_event =
+             project
+             |> trace_events!(thread["id"])
+             |> Enum.find(&(&1["scope"] == "codex_rpc" and &1["event_name"] == "decode_failed"))
+
+    assert decode_event["status"] == "error"
+    assert get_in(decode_event, ["raw", "line_preview"]) =~ "not-json"
+    assert get_in(decode_event, ["raw", "size_bytes"]) == byte_size("not-json")
+    assert is_binary(get_in(decode_event, ["raw", "sha256"]))
+  end
+
   test "run_turn parses image generation notifications split by the port line limit" do
     System.put_env("AVCS_FAKE_CODEX_MODE", "large_image_generation")
     project = open_test_project()
@@ -371,11 +491,18 @@ defmodule Avcs.Agent.CodexClientTest do
     System.put_env("AVCS_FAKE_CODEX_MODE", "hanging_turn")
     Application.put_env(:avcs, :codex_request_timeout_ms, 1_000)
     Application.put_env(:avcs, :codex_idle_timeout_ms, 150)
-    project = open_test_project()
+    %{project: project, thread: thread, turn: turn} = open_test_project_with_turn()
 
     task =
       Task.async(fn ->
-        Avcs.Agent.CodexClient.run_turn(project, nil, "Hang", [], fn _event -> :ok end, %{})
+        Avcs.Agent.CodexClient.run_turn(
+          project,
+          nil,
+          "Hang",
+          [],
+          fn _event -> :ok end,
+          %{avcs_thread_id: thread["id"], avcs_turn_id: turn["id"]}
+        )
       end)
 
     wait_for_event(events_path, "hanging-turn")
@@ -383,6 +510,12 @@ defmodule Avcs.Agent.CodexClientTest do
 
     assert {:error, "Codex app-server idle timed out"} = Task.await(task, 2_000)
     assert_pid_dead(pid)
+
+    assert Enum.any?(
+             trace_events!(project, thread["id"]),
+             &(&1["scope"] == "codex_rpc" and &1["event_name"] == "request_timeout" and
+                 &1["status"] == "timeout")
+           )
   end
 
   test "steer_turn sends expected active turn params", %{
@@ -578,6 +711,10 @@ defmodule Avcs.Agent.CodexClientTest do
           ;;
         *\\"method\\":\\"turn/start\\"*)
           event_log turn-start
+          if [ "$mode" = "turn_start_error" ]; then
+            printf '%s\\n' "{\\"id\\":$id,\\"error\\":{\\"code\\":-32000,\\"message\\":\\"turn start rejected\\"}}"
+            continue
+          fi
           if [ "$mode" = "slow_turn_start_response" ]; then
             event_log slow-turn-start-response
             sleep 0.75
@@ -600,6 +737,13 @@ defmodule Avcs.Agent.CodexClientTest do
             continue
           fi
           printf '%s\\n' "{\\"id\\":$id,\\"result\\":{\\"turn\\":{\\"id\\":\\"turn-1\\"}}}"
+          if [ "$mode" = "decode_error_then_complete" ]; then
+            event_log decode-error
+            printf '%s\\n' "not-json"
+            printf '%s\\n' "{\\"method\\":\\"item/agentMessage/delta\\",\\"params\\":{\\"delta\\":\\"after-bad-json\\"}}"
+            printf '%s\\n' "{\\"method\\":\\"turn/completed\\",\\"params\\":{\\"turn\\":{\\"id\\":\\"turn-1\\",\\"status\\":\\"completed\\"}}}"
+            continue
+          fi
           if [ "$mode" = "hanging_turn" ] || [ "$mode" = "steer_reject" ]; then
             event_log hanging-turn
             continue
@@ -683,6 +827,23 @@ defmodule Avcs.Agent.CodexClientTest do
 
     on_exit(fn -> File.rm_rf!(project_dir) end)
     project
+  end
+
+  defp open_test_project_with_turn do
+    project = open_test_project()
+    {:ok, thread} = Avcs.Threads.create_thread(project, "Trace thread")
+    {:ok, created} = Avcs.Turns.create_user_turn(project, thread["id"], "Trace prompt", [])
+
+    %{
+      project: project,
+      thread: thread,
+      turn: created["turn"]
+    }
+  end
+
+  defp trace_events!(project, thread_id) do
+    assert {:ok, events} = Avcs.Trace.list_events(project, thread_id)
+    events
   end
 
   defp read_logged_pid!(log_path) do

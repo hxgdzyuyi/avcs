@@ -4,6 +4,8 @@ defmodule Avcs.Agent.CodexClient do
   use GenServer
   require Logger
 
+  alias Avcs.Agent.CodexRpcTrace
+
   @default_request_timeout_ms 30_000
   @default_idle_timeout_ms 1_800_000
   @thread_read_timeout_ms 5_000
@@ -60,6 +62,7 @@ defmodule Avcs.Agent.CodexClient do
        initialized?: false,
        loaded_thread_ids: MapSet.new(),
        active: nil,
+       rpc_requests_by_id: %{},
        stdout_buffer: "",
        request_id: 1,
        last_used: System.monotonic_time(:millisecond)
@@ -89,21 +92,21 @@ defmodule Avcs.Agent.CodexClient do
     )
   end
 
-  def list_models do
+  def list_models(opts \\ []) do
     timeout = Application.get_env(:avcs, :codex_model_list_timeout_ms, @model_list_timeout_ms)
-    call_server(:list_models, timeout + @call_timeout_buffer_ms)
+    call_server({:list_models, opts}, timeout + @call_timeout_buffer_ms)
   end
 
-  def list_models_on(server) do
+  def list_models_on(server, opts \\ []) do
     timeout = Application.get_env(:avcs, :codex_model_list_timeout_ms, @model_list_timeout_ms)
-    call_server(server, :list_models, timeout + @call_timeout_buffer_ms)
+    call_server(server, {:list_models, opts}, timeout + @call_timeout_buffer_ms)
   end
 
   def read_thread(codex_thread_id, opts \\ []) do
     timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
 
     call_server(
-      {:read_thread, codex_thread_id, Keyword.get(opts, :include_turns, false), timeout},
+      {:read_thread, codex_thread_id, opts, timeout},
       timeout + @call_timeout_buffer_ms
     )
   end
@@ -113,7 +116,7 @@ defmodule Avcs.Agent.CodexClient do
 
     call_server(
       server,
-      {:read_thread, codex_thread_id, Keyword.get(opts, :include_turns, false), timeout},
+      {:read_thread, codex_thread_id, opts, timeout},
       timeout + @call_timeout_buffer_ms
     )
   end
@@ -141,7 +144,7 @@ defmodule Avcs.Agent.CodexClient do
     timeout = Keyword.get(opts, :timeout_ms, codex_request_timeout_ms())
 
     call_server(
-      {:rollback_thread, codex_thread_id, num_turns, timeout},
+      {:rollback_thread, codex_thread_id, num_turns, opts, timeout},
       timeout + @call_timeout_buffer_ms
     )
   end
@@ -151,7 +154,7 @@ defmodule Avcs.Agent.CodexClient do
 
     call_server(
       server,
-      {:rollback_thread, codex_thread_id, num_turns, timeout},
+      {:rollback_thread, codex_thread_id, num_turns, opts, timeout},
       timeout + @call_timeout_buffer_ms
     )
   end
@@ -219,6 +222,7 @@ defmodule Avcs.Agent.CodexClient do
       text: text,
       reference_paths: reference_paths,
       on_event: on_event,
+      trace_context: trace_context_from_opts(project, codex_thread_id, opts),
       opts: normalize_turn_opts(opts),
       request_timeout_ms: codex_request_timeout_ms(),
       idle_timeout_ms: codex_idle_timeout_ms()
@@ -228,26 +232,28 @@ defmodule Avcs.Agent.CodexClient do
   end
 
   @impl true
-  def handle_call(:list_models, from, state) do
+  def handle_call({:list_models, opts}, from, state) do
     timeout = Application.get_env(:avcs, :codex_model_list_timeout_ms, @model_list_timeout_ms)
 
     request = %{
       kind: :list_models,
       from: from,
       on_event: fn _event -> :ok end,
+      trace_context: trace_context_from_opts(nil, nil, opts),
       timeout_ms: timeout
     }
 
     {:noreply, begin_request(request, state)}
   end
 
-  def handle_call({:read_thread, codex_thread_id, include_turns, timeout_ms}, from, state) do
+  def handle_call({:read_thread, codex_thread_id, opts, timeout_ms}, from, state) do
     request = %{
       kind: :read_thread,
       from: from,
       codex_thread_id: codex_thread_id,
-      include_turns: include_turns == true,
+      include_turns: Keyword.get(opts, :include_turns, false) == true,
       on_event: fn _event -> :ok end,
+      trace_context: trace_context_from_opts(nil, codex_thread_id, opts),
       timeout_ms: timeout_ms
     }
 
@@ -261,19 +267,21 @@ defmodule Avcs.Agent.CodexClient do
       codex_thread_id: codex_thread_id,
       opts: normalize_turn_opts(opts),
       on_event: fn _event -> :ok end,
+      trace_context: trace_context_from_opts(nil, codex_thread_id, opts),
       timeout_ms: timeout_ms
     }
 
     {:noreply, begin_request(request, state)}
   end
 
-  def handle_call({:rollback_thread, codex_thread_id, num_turns, timeout_ms}, from, state) do
+  def handle_call({:rollback_thread, codex_thread_id, num_turns, opts, timeout_ms}, from, state) do
     request = %{
       kind: :rollback_thread,
       from: from,
       codex_thread_id: codex_thread_id,
       num_turns: num_turns,
       on_event: fn _event -> :ok end,
+      trace_context: trace_context_from_opts(nil, codex_thread_id, opts),
       timeout_ms: timeout_ms
     }
 
@@ -311,6 +319,7 @@ defmodule Avcs.Agent.CodexClient do
       "Codex app-server exited with status #{status}, os_pid: #{inspect(state.os_pid)}"
     )
 
+    trace_runtime_error(state, "port_exited", %{exit_status: status, os_pid: state.os_pid})
     cleanup_os_process(state.os_pid)
 
     state =
@@ -327,6 +336,7 @@ defmodule Avcs.Agent.CodexClient do
       "Codex app-server port exited: #{inspect(reason)}, os_pid: #{inspect(state.os_pid)}"
     )
 
+    trace_runtime_error(state, "port_exited", %{reason: inspect(reason), os_pid: state.os_pid})
     cleanup_os_process(state.os_pid)
 
     state =
@@ -356,6 +366,7 @@ defmodule Avcs.Agent.CodexClient do
             "Ignoring undecodable Codex app-server line: #{decode_error_summary(reason, line)}"
           )
 
+          trace_decode_failed(state, line, decode_error_summary(reason, line))
           state
       end
 
@@ -379,12 +390,33 @@ defmodule Avcs.Agent.CodexClient do
     state =
       case state.active do
         %{timer_ref: ^timer_ref, kind: :run_turn, phase: :refresh_thread_name} = active ->
+          trace_runtime_error(state, "request_timeout", %{
+            phase: active.phase,
+            timer_kind: active.timer_kind,
+            os_pid: state.os_pid,
+            reason: "Codex app-server thread name refresh timed out"
+          })
+
           finish_request({:ok, run_result(active)}, state)
 
-        %{timer_ref: ^timer_ref, timer_kind: :idle} ->
+        %{timer_ref: ^timer_ref, timer_kind: :idle} = active ->
+          trace_runtime_error(state, "request_timeout", %{
+            phase: active[:phase],
+            timer_kind: active.timer_kind,
+            os_pid: state.os_pid,
+            reason: "Codex app-server idle timed out"
+          })
+
           fail_active(state, "Codex app-server idle timed out", close_port?: true)
 
-        %{timer_ref: ^timer_ref} ->
+        %{timer_ref: ^timer_ref} = active ->
+          trace_runtime_error(state, "request_timeout", %{
+            phase: active[:phase],
+            timer_kind: active[:timer_kind],
+            os_pid: state.os_pid,
+            reason: "Codex app-server timed out"
+          })
+
           fail_active(state, "Codex app-server timed out", close_port?: true)
 
         _active ->
@@ -490,22 +522,35 @@ defmodule Avcs.Agent.CodexClient do
   end
 
   defp start_initialize(request, state) do
-    send_json(state.port, %{
-      method: "initialize",
-      id: 0,
-      params: %{
-        clientInfo: %{name: "avcs", title: "Avcs", version: "0.1.0"},
-        capabilities: %{experimentalApi: true}
-      }
-    })
+    context = Map.get(request, :trace_context, %{})
 
-    send_json(state.port, %{method: "initialized", params: %{}})
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "initialize",
+          id: 0,
+          params: %{
+            clientInfo: %{name: "avcs", title: "Avcs", version: "0.1.0"},
+            capabilities: %{experimentalApi: true}
+          }
+        },
+        %{context: context, phase: :initialize, schema: :initialize_params}
+      )
+
+    state =
+      send_rpc(
+        state,
+        %{method: "initialized", params: %{}},
+        %{context: context, phase: :initialized}
+      )
 
     active = %{
       kind: :initialize,
       from: request.from,
       on_event: request.on_event,
       request: request,
+      trace_context: context,
       request_id: 0,
       timer_ref: schedule_timeout(request_timeout_ms(request)),
       timer_kind: :request
@@ -520,15 +565,25 @@ defmodule Avcs.Agent.CodexClient do
 
     {id, state} = next_request_id(state)
 
-    send_json(state.port, %{
-      method: "model/list",
-      id: id,
-      params: params
-    })
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "model/list",
+          id: id,
+          params: params
+        },
+        %{
+          context: request.trace_context,
+          phase: :model_list_response,
+          schema: :model_list_params
+        }
+      )
 
     active = %{
       kind: :list_models,
       from: request.from,
+      trace_context: request.trace_context,
       request_id: id,
       timer_ref: schedule_timeout(request.timeout_ms),
       timer_kind: :request
@@ -543,15 +598,25 @@ defmodule Avcs.Agent.CodexClient do
 
     {id, state} = next_request_id(state)
 
-    send_json(state.port, %{
-      method: "thread/read",
-      id: id,
-      params: params
-    })
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "thread/read",
+          id: id,
+          params: params
+        },
+        %{
+          context: request.trace_context,
+          phase: :thread_read_response,
+          schema: :thread_read_params
+        }
+      )
 
     active = %{
       kind: :read_thread,
       from: request.from,
+      trace_context: request.trace_context,
       request_id: id,
       timer_ref: schedule_timeout(request.timeout_ms),
       timer_kind: :request
@@ -576,15 +641,25 @@ defmodule Avcs.Agent.CodexClient do
 
     {id, state} = next_request_id(state)
 
-    send_json(state.port, %{
-      method: "thread/fork",
-      id: id,
-      params: params
-    })
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "thread/fork",
+          id: id,
+          params: params
+        },
+        %{
+          context: request.trace_context,
+          phase: :thread_fork_response,
+          schema: :thread_fork_params
+        }
+      )
 
     active = %{
       kind: :fork_thread,
       from: request.from,
+      trace_context: request.trace_context,
       request_id: id,
       timer_ref: schedule_timeout(request.timeout_ms),
       timer_kind: :request
@@ -599,15 +674,25 @@ defmodule Avcs.Agent.CodexClient do
 
     {id, state} = next_request_id(state)
 
-    send_json(state.port, %{
-      method: "thread/rollback",
-      id: id,
-      params: params
-    })
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "thread/rollback",
+          id: id,
+          params: params
+        },
+        %{
+          context: request.trace_context,
+          phase: :thread_rollback_response,
+          schema: :thread_rollback_params
+        }
+      )
 
     active = %{
       kind: :rollback_thread,
       from: request.from,
+      trace_context: request.trace_context,
       request_id: id,
       timer_ref: schedule_timeout(request.timeout_ms),
       timer_kind: :request
@@ -631,19 +716,25 @@ defmodule Avcs.Agent.CodexClient do
     send_thread_request(request, state)
   end
 
-  defp handle_app_server_message(%{"id" => id, "error" => error} = message, state) do
+  defp handle_app_server_message(message, state) do
+    {request_meta, state} = take_rpc_request(message, state)
+    state = trace_inbound_rpc(state, message, request_meta)
+    dispatch_app_server_message(message, state)
+  end
+
+  defp dispatch_app_server_message(%{"id" => id, "error" => error} = message, state) do
     handle_response_error(id, error, message, state)
   end
 
-  defp handle_app_server_message(%{"id" => id, "result" => result} = message, state) do
+  defp dispatch_app_server_message(%{"id" => id, "result" => result} = message, state) do
     handle_response_result(id, result, message, state)
   end
 
-  defp handle_app_server_message(%{"method" => _method} = message, state) do
+  defp dispatch_app_server_message(%{"method" => _method} = message, state) do
     handle_notification(message, state)
   end
 
-  defp handle_app_server_message(message, state) do
+  defp dispatch_app_server_message(message, state) do
     Logger.debug("Ignoring Codex app-server message: #{inspect(message)}")
     state
   end
@@ -1058,11 +1149,20 @@ defmodule Avcs.Agent.CodexClient do
 
       {id, state} = next_request_id(state)
 
-      send_json(state.port, %{
-        method: "thread/approveGuardianDeniedAction",
-        id: id,
-        params: params
-      })
+      state =
+        send_rpc(
+          state,
+          %{
+            method: "thread/approveGuardianDeniedAction",
+            id: id,
+            params: params
+          },
+          %{
+            context: active.trace_context,
+            phase: :approval_response,
+            schema: :thread_approve_guardian_denied_action_params
+          }
+        )
 
       active.on_event.({:approval_response_sent, Map.put(payload, :request_id, id), params})
 
@@ -1118,7 +1218,7 @@ defmodule Avcs.Agent.CodexClient do
   defp send_thread_request(request, state) do
     opts = request.opts
 
-    {thread_id, schema_name, params, method} =
+    {thread_id, schema_name, params_schema_name, params, method} =
       if request.codex_thread_id do
         params =
           compact(%{
@@ -1131,7 +1231,9 @@ defmodule Avcs.Agent.CodexClient do
           })
 
         validate_params(:thread_resume_params, params, "thread/resume params")
-        {request.codex_thread_id, :thread_resume_response, params, "thread/resume"}
+
+        {request.codex_thread_id, :thread_resume_response, :thread_resume_params, params,
+         "thread/resume"}
       else
         params =
           compact(%{
@@ -1144,11 +1246,21 @@ defmodule Avcs.Agent.CodexClient do
           })
 
         validate_params(:thread_start_params, params, "thread/start params")
-        {nil, :thread_start_response, params, "thread/start"}
+        {nil, :thread_start_response, :thread_start_params, params, "thread/start"}
       end
 
     {id, state} = next_request_id(state)
-    send_json(state.port, %{method: method, id: id, params: params})
+
+    state =
+      send_rpc(
+        state,
+        %{method: method, id: id, params: params},
+        %{
+          context: request.trace_context,
+          phase: :thread_response,
+          schema: params_schema_name
+        }
+      )
 
     active =
       request
@@ -1169,6 +1281,9 @@ defmodule Avcs.Agent.CodexClient do
       phase: nil,
       from: request.from,
       project: request.project,
+      trace_context: request.trace_context,
+      avcs_thread_id: request.trace_context.thread_id,
+      avcs_turn_id: request.trace_context.turn_id,
       text: request.text,
       reference_paths: request.reference_paths,
       on_event: request.on_event,
@@ -1227,11 +1342,16 @@ defmodule Avcs.Agent.CodexClient do
 
     {id, state} = next_request_id(state)
 
-    send_json(state.port, %{
-      method: "turn/start",
-      id: id,
-      params: params
-    })
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "turn/start",
+          id: id,
+          params: params
+        },
+        %{context: active.trace_context, phase: :turn_start_response, schema: :turn_start_params}
+      )
 
     active =
       active
@@ -1252,11 +1372,16 @@ defmodule Avcs.Agent.CodexClient do
 
     {id, state} = next_request_id(state)
 
-    send_json(state.port, %{
-      method: "turn/steer",
-      id: id,
-      params: params
-    })
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "turn/steer",
+          id: id,
+          params: params
+        },
+        %{context: active.trace_context, phase: :turn_steer_response, schema: :turn_steer_params}
+      )
 
     active =
       active
@@ -1278,11 +1403,20 @@ defmodule Avcs.Agent.CodexClient do
 
     {id, state} = next_request_id(state)
 
-    send_json(state.port, %{
-      method: "turn/interrupt",
-      id: id,
-      params: params
-    })
+    state =
+      send_rpc(
+        state,
+        %{
+          method: "turn/interrupt",
+          id: id,
+          params: params
+        },
+        %{
+          context: active.trace_context,
+          phase: :turn_interrupt_response,
+          schema: :turn_interrupt_params
+        }
+      )
 
     active =
       active
@@ -1304,7 +1438,17 @@ defmodule Avcs.Agent.CodexClient do
     validate_params(:thread_read_params, params, "thread/read params")
 
     {id, state} = next_request_id(state)
-    send_json(state.port, %{method: "thread/read", id: id, params: params})
+
+    state =
+      send_rpc(
+        state,
+        %{method: "thread/read", id: id, params: params},
+        %{
+          context: active.trace_context,
+          phase: :refresh_thread_name,
+          schema: :thread_read_params
+        }
+      )
 
     active =
       active
@@ -1577,7 +1721,9 @@ defmodule Avcs.Agent.CodexClient do
   defp mark_thread_loaded(state, _thread_id), do: state
 
   defp ensure_runtime_state(state) do
-    Map.put_new(state, :loaded_thread_ids, MapSet.new())
+    state
+    |> Map.put_new(:loaded_thread_ids, MapSet.new())
+    |> Map.put_new(:rpc_requests_by_id, %{})
   end
 
   defp error_message(%{"message" => message}) when is_binary(message), do: message
@@ -1779,6 +1925,7 @@ defmodule Avcs.Agent.CodexClient do
       os_pid: nil,
       initialized?: false,
       loaded_thread_ids: MapSet.new(),
+      rpc_requests_by_id: %{},
       stdout_buffer: ""
     })
   end
@@ -1796,16 +1943,134 @@ defmodule Avcs.Agent.CodexClient do
 
   defp close_port(_port), do: :ok
 
+  defp send_rpc(state, message, meta) do
+    context = rpc_context(state, meta)
+    context = enrich_rpc_context(context, message)
+    meta = Map.put(meta, :sent_at, Avcs.Time.now_iso())
+
+    CodexRpcTrace.append_outbound(context.project, context, message, meta)
+    send_json(state.port, message)
+    put_rpc_request(state, message, meta, context)
+  end
+
+  defp put_rpc_request(state, message, meta, context) do
+    case {value(message, :id), value(message, :method)} do
+      {id, method} when not is_nil(id) and is_binary(method) ->
+        request = %{
+          rpc_id: id,
+          method: method,
+          phase: value(meta, :phase),
+          schema: value(meta, :schema),
+          sent_at: value(meta, :sent_at),
+          context: context
+        }
+
+        Map.update(state, :rpc_requests_by_id, %{id => request}, &Map.put(&1, id, request))
+
+      _other ->
+        state
+    end
+  end
+
+  defp take_rpc_request(%{"id" => id}, state) do
+    requests = Map.get(state, :rpc_requests_by_id, %{})
+    {Map.get(requests, id), %{state | rpc_requests_by_id: Map.delete(requests, id)}}
+  end
+
+  defp take_rpc_request(_message, state), do: {nil, state}
+
+  defp trace_inbound_rpc(state, message, request_meta) do
+    context =
+      (request_meta && request_meta.context) ||
+        CodexRpcTrace.context_from_active(state.active)
+
+    meta =
+      request_meta ||
+        %{
+          phase: state.active && state.active[:phase]
+        }
+
+    CodexRpcTrace.append_inbound(context.project, context, message, meta || %{})
+    state
+  end
+
+  defp trace_decode_failed(state, line, reason) do
+    context = CodexRpcTrace.context_from_active(state.active)
+    CodexRpcTrace.append_decode_failed(context.project, context, line, reason)
+  end
+
+  defp trace_runtime_error(state, event_name, meta) do
+    context = CodexRpcTrace.context_from_active(state.active)
+
+    request_meta =
+      state
+      |> active_request_id()
+      |> then(&Map.get(Map.get(state, :rpc_requests_by_id, %{}), &1))
+
+    meta =
+      (request_meta || %{})
+      |> Map.merge(meta)
+
+    CodexRpcTrace.append_runtime_error(context.project, context, event_name, meta)
+  end
+
+  defp active_request_id(%{active: %{phase: :thread_response, thread_request_id: id}}), do: id
+  defp active_request_id(%{active: %{phase: :turn_start_response, turn_request_id: id}}), do: id
+
+  defp active_request_id(%{active: %{phase: :refresh_thread_name, refresh_request_id: id}}),
+    do: id
+
+  defp active_request_id(%{active: %{request_id: id}}), do: id
+  defp active_request_id(_state), do: nil
+
+  defp rpc_context(_state, %{context: context}) when is_map(context) do
+    context
+  end
+
+  defp rpc_context(state, _meta) do
+    CodexRpcTrace.context_from_active(state.active)
+  end
+
+  defp enrich_rpc_context(context, message) do
+    ids = CodexRpcTrace.codex_ids_from_message(message, context)
+
+    context
+    |> Map.put(:codex_thread_id, ids.codex_thread_id || context[:codex_thread_id])
+    |> Map.put(:codex_turn_id, ids.codex_turn_id || context[:codex_turn_id])
+    |> Map.put(:codex_item_id, ids.codex_item_id || context[:codex_item_id])
+  end
+
   defp send_json(port, message) do
     Port.command(port, Jason.encode!(message) <> "\n")
+  end
+
+  defp trace_context_from_opts(project, codex_thread_id, opts) do
+    %{
+      project: value(opts, :project) || project,
+      thread_id: value(opts, :avcs_thread_id),
+      turn_id: value(opts, :avcs_turn_id),
+      codex_thread_id: value(opts, :codex_thread_id) || codex_thread_id
+    }
   end
 
   defp value(map, key) when is_map(map) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
 
-  defp value(list, key) when is_list(list), do: Keyword.get(list, key)
+  defp value(list, key) when is_list(list) do
+    Enum.find_value(list, fn
+      {candidate, value} ->
+        if candidate == key or candidate == key_string(key), do: value
+
+      _entry ->
+        nil
+    end)
+  end
+
   defp value(_value, _key), do: nil
+
+  defp key_string(key) when is_atom(key), do: Atom.to_string(key)
+  defp key_string(key), do: to_string(key)
 
   defp clean_optional_string(nil), do: nil
 

@@ -384,6 +384,7 @@ function SnapshotView({
 
 function TracingFilters({ filters, options, disabled, onChange }) {
   const hasFilters = Boolean(filters.query || filters.scope || filters.status || filters.eventName);
+  const hasCodexRpcScope = options.scopes.includes("codex_rpc");
 
   function setFilter(key, value) {
     onChange((current) => ({ ...current, [key]: value }));
@@ -449,6 +450,16 @@ function TracingFilters({ filters, options, disabled, onChange }) {
       <button type="button" className="tracing-filter-reset" disabled={disabled || !hasFilters} onClick={clearFilters}>
         Reset
       </button>
+      {hasCodexRpcScope ? (
+        <button
+          type="button"
+          className={`tracing-filter-reset${filters.scope === "codex_rpc" ? " active" : ""}`}
+          disabled={disabled}
+          onClick={() => setFilter("scope", filters.scope === "codex_rpc" ? "" : "codex_rpc")}
+        >
+          Codex RPC
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -546,7 +557,7 @@ function TimelineGroupNode({ group, index = null, selectedTimelineKey, onSelectT
             >
               <span className={`tracing-item-dot ${event.status || "completed"}`} />
               <span>{event.event_name || "event"}</span>
-              <small>{[event.scope, event.status, formatTime(event.created_at)].filter(Boolean).join(" · ")}</small>
+              <small>{traceEventSubtitle(event)}</small>
             </button>
           );
         })}
@@ -762,6 +773,13 @@ function EventDetail({ event }) {
       <section className="tracing-facts">
         <Fact label="Event ID" value={event.id} />
         <Fact label="Scope" value={event.scope} />
+        {event.scope === "codex_rpc" ? (
+          <>
+            <Fact label="RPC Method" value={codexRpcPayloadValue(event, "method")} />
+            <Fact label="Direction" value={codexRpcPayloadValue(event, "direction")} />
+            <Fact label="RPC ID" value={codexRpcPayloadValue(event, "rpc_id")} />
+          </>
+        ) : null}
         <Fact label="Thread ID" value={event.thread_id} />
         <Fact label="Turn ID" value={event.turn_id} />
         <Fact label="Item ID" value={event.item_id} />
@@ -804,7 +822,7 @@ function EventTimeline({ title, events = [], emptyLabel, compact = false }) {
                 <span className={`tracing-item-dot ${event.status || "completed"}`} />
                 <strong>{event.event_name || "event"}</strong>
                 <small>
-                  {[event.scope, event.status, formatTime(event.created_at)].filter(Boolean).join(" · ")}
+                  {traceEventSubtitle(event)}
                 </small>
               </header>
               <dl>
@@ -1281,6 +1299,9 @@ function timelineGroupMarkdown(group) {
       index + 1,
       markdownTableCell(event.created_at),
       markdownTableCell(event.scope),
+      markdownTableCell(codexRpcPayloadValue(event, "method")),
+      markdownTableCell(codexRpcPayloadValue(event, "direction")),
+      markdownTableCell(codexRpcPayloadValue(event, "rpc_id")),
       markdownTableCell(event.event_name),
       markdownTableCell(event.status),
       markdownTableCell(event.item_id),
@@ -1294,6 +1315,9 @@ function timelineGroupMarkdown(group) {
     `- Event ID: ${event.id || "-"}`,
     `- Created: ${event.created_at || "-"}`,
     `- Scope: ${event.scope || "-"}`,
+    `- RPC Method: ${codexRpcPayloadValue(event, "method") || "-"}`,
+    `- Direction: ${codexRpcPayloadValue(event, "direction") || "-"}`,
+    `- RPC ID: ${codexRpcPayloadValue(event, "rpc_id") || "-"}`,
     `- Status: ${event.status || "-"}`,
     `- Item ID: ${event.item_id || "-"}`,
     `- Codex Turn ID: ${event.codex_turn_id || "-"}`,
@@ -1319,8 +1343,8 @@ function timelineGroupMarkdown(group) {
     "",
     "## Timeline",
     "",
-    "# | Created | Scope | Event | Status | Item ID | Codex Item ID",
-    "--- | --- | --- | --- | --- | --- | ---",
+    "# | Created | Scope | RPC Method | Direction | RPC ID | Event | Status | Item ID | Codex Item ID",
+    "--- | --- | --- | --- | --- | --- | --- | --- | --- | ---",
     ...timelineRows,
     "",
     "## Event Rows",
@@ -1331,6 +1355,24 @@ function timelineGroupMarkdown(group) {
 
 function markdownTableCell(value) {
   return String(value || "-").replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+function traceEventSubtitle(event) {
+  return [event.scope, codexRpcSummary(event), event.status, formatTime(event.created_at)].filter(Boolean).join(" · ");
+}
+
+function codexRpcSummary(event) {
+  if (event?.scope !== "codex_rpc") return "";
+
+  const method = codexRpcPayloadValue(event, "method");
+  const direction = codexRpcPayloadValue(event, "direction");
+  const rpcId = codexRpcPayloadValue(event, "rpc_id");
+  return [direction, method, rpcId ? `#${rpcId}` : ""].filter(Boolean).join(" ");
+}
+
+function codexRpcPayloadValue(event, key) {
+  if (event?.scope !== "codex_rpc" || !event.payload || typeof event.payload !== "object") return "";
+  return event.payload[key] ?? "";
 }
 
 function traceEventSearchText(event) {
