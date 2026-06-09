@@ -1,6 +1,8 @@
 defmodule Avcs.Agent.AvcsAgentClient do
   @moduledoc false
 
+  alias Avcs.Agent.VercelApiTrace
+
   @default_request_timeout_ms 300_000
   @default_connect_timeout_ms 30_000
   @default_stream_retry_attempts 3
@@ -42,7 +44,13 @@ defmodule Avcs.Agent.AvcsAgentClient do
 
     with :ok <- require_api_key(settings),
          {:ok, _status, body} <-
-           request(:post, endpoint(settings, "/chat/completions"), payload, settings),
+           request(
+             :post,
+             endpoint(settings, "/chat/completions"),
+             payload,
+             settings,
+             trace_meta(opts, payload, "http_json")
+           ),
          {:ok, json} <- Jason.decode(body) do
       {:ok, parse_completion(json)}
     else
@@ -74,7 +82,8 @@ defmodule Avcs.Agent.AvcsAgentClient do
              payload,
              settings,
              on_event,
-             interrupted?
+             interrupted?,
+             trace_meta(opts, payload, "sse")
            ) do
         {:ok, result} -> {:ok, Map.put_new(result, :remote_model, model)}
         {:error, reason} -> {:error, reason}
@@ -128,7 +137,13 @@ defmodule Avcs.Agent.AvcsAgentClient do
           |> Map.merge(image_option_fields(opts))
           |> compact()
 
-        request(:post, endpoint(settings, "/images/generations"), payload, settings)
+        request(
+          :post,
+          endpoint(settings, "/images/generations"),
+          payload,
+          settings,
+          trace_meta(opts, payload, "http_json", summary_opts: image_summary_opts([], nil, opts))
+        )
     end
   end
 
@@ -169,7 +184,20 @@ defmodule Avcs.Agent.AvcsAgentClient do
       end)
       |> Kernel.++(mask_file(mask_image))
 
-    request_multipart(endpoint(settings, "/images/edits"), fields, files, settings)
+    request_multipart(
+      endpoint(settings, "/images/edits"),
+      fields,
+      files,
+      settings,
+      trace_meta(opts, nil, "http_multipart",
+        request_summary:
+          VercelApiTrace.multipart_request_summary(
+            fields,
+            files,
+            image_summary_opts(reference_images, mask_image, opts)
+          )
+      )
+    )
   end
 
   defp chat_image_request(settings, model, prompt, count, reference_images, mask_image, opts) do
@@ -189,7 +217,15 @@ defmodule Avcs.Agent.AvcsAgentClient do
         }
         |> compact()
 
-      request(:post, endpoint(settings, "/chat/completions"), payload, settings)
+      request(
+        :post,
+        endpoint(settings, "/chat/completions"),
+        payload,
+        settings,
+        trace_meta(opts, payload, "http_json",
+          summary_opts: image_summary_opts(reference_images, mask_image, opts)
+        )
+      )
     end
   end
 
@@ -337,8 +373,13 @@ defmodule Avcs.Agent.AvcsAgentClient do
     }
   end
 
-  defp request(method, url, payload, settings) do
+  defp request(method, url, payload, settings, trace_meta \\ %{}) do
     ensure_http_started()
+
+    trace_context = VercelApiTrace.context_from_opts(trace_meta)
+    trace_meta = trace_request_meta(method, url, payload, trace_meta, 1, 1)
+    started_at_ms = System.monotonic_time(:millisecond)
+    VercelApiTrace.append_request_sent(trace_context, trace_meta)
 
     headers = [
       {~c"authorization", to_charlist("Bearer " <> settings.api_key)},
@@ -356,22 +397,55 @@ defmodule Avcs.Agent.AvcsAgentClient do
 
     case :httpc.request(method, request, http_opts, opts) do
       {:ok, {{_version, status, _reason}, _headers, body}} when status in 200..299 ->
+        VercelApiTrace.append_response_received(
+          trace_context,
+          "ok",
+          trace_meta
+          |> Map.put(
+            :response_summary,
+            VercelApiTrace.response_summary(body,
+              http_status: status,
+              duration_ms: VercelApiTrace.duration_ms(started_at_ms)
+            )
+          )
+        )
+
         {:ok, status, body}
 
       {:ok, {{_version, status, reason}, _headers, body}} ->
+        VercelApiTrace.append_response_received(
+          trace_context,
+          "error",
+          trace_meta
+          |> Map.put(
+            :response_summary,
+            VercelApiTrace.response_summary(body,
+              http_status: status,
+              duration_ms: VercelApiTrace.duration_ms(started_at_ms),
+              reason: to_string(reason)
+            )
+          )
+        )
+
         {:error, gateway_error(status, reason, body, payload)}
 
       {:error, reason} ->
+        trace_request_failure(trace_context, trace_meta, reason, started_at_ms, false, false)
         {:error, "AI Gateway request failed: #{inspect(reason)}"}
     end
   end
 
-  defp request_multipart(url, fields, files, settings) do
+  defp request_multipart(url, fields, files, settings, trace_meta) do
     ensure_http_started()
 
     boundary = multipart_boundary()
 
     with {:ok, body} <- multipart_body(boundary, fields, files) do
+      trace_context = VercelApiTrace.context_from_opts(trace_meta)
+      trace_meta = trace_request_meta(:post, url, nil, trace_meta, 1, 1)
+      started_at_ms = System.monotonic_time(:millisecond)
+      VercelApiTrace.append_request_sent(trace_context, trace_meta)
+
       headers = [
         {~c"authorization", to_charlist("Bearer " <> settings.api_key)}
       ]
@@ -384,12 +458,40 @@ defmodule Avcs.Agent.AvcsAgentClient do
 
       case :httpc.request(:post, request, http_opts, opts) do
         {:ok, {{_version, status, _reason}, _headers, body}} when status in 200..299 ->
+          VercelApiTrace.append_response_received(
+            trace_context,
+            "ok",
+            trace_meta
+            |> Map.put(
+              :response_summary,
+              VercelApiTrace.response_summary(body,
+                http_status: status,
+                duration_ms: VercelApiTrace.duration_ms(started_at_ms)
+              )
+            )
+          )
+
           {:ok, status, body}
 
         {:ok, {{_version, status, reason}, _headers, body}} ->
+          VercelApiTrace.append_response_received(
+            trace_context,
+            "error",
+            trace_meta
+            |> Map.put(
+              :response_summary,
+              VercelApiTrace.response_summary(body,
+                http_status: status,
+                duration_ms: VercelApiTrace.duration_ms(started_at_ms),
+                reason: to_string(reason)
+              )
+            )
+          )
+
           {:error, gateway_error(status, reason, body, error_payload)}
 
         {:error, reason} ->
+          trace_request_failure(trace_context, trace_meta, reason, started_at_ms, false, false)
           {:error, "AI Gateway request failed: #{inspect(reason)}"}
       end
     end
@@ -465,20 +567,39 @@ defmodule Avcs.Agent.AvcsAgentClient do
     |> String.replace("\"", "\\\"")
   end
 
-  defp stream_request(url, payload, settings, on_event, interrupted?) do
+  defp stream_request(url, payload, settings, on_event, interrupted?, trace_meta) do
     retry_stream_request(
       url,
       payload,
       settings,
       on_event,
       interrupted?,
+      trace_meta,
       1,
       stream_retry_attempts()
     )
   end
 
-  defp retry_stream_request(url, payload, settings, on_event, interrupted?, attempt, max_attempts) do
-    case do_stream_request(url, payload, settings, on_event, interrupted?) do
+  defp retry_stream_request(
+         url,
+         payload,
+         settings,
+         on_event,
+         interrupted?,
+         trace_meta,
+         attempt,
+         max_attempts
+       ) do
+    case do_stream_request(
+           url,
+           payload,
+           settings,
+           on_event,
+           interrupted?,
+           trace_meta,
+           attempt,
+           max_attempts
+         ) do
       {:error, {:retryable_stream_failure, _reason}} when attempt < max_attempts ->
         case wait_for_stream_retry(stream_retry_backoff_ms(attempt), interrupted?) do
           :ok ->
@@ -488,6 +609,7 @@ defmodule Avcs.Agent.AvcsAgentClient do
               settings,
               on_event,
               interrupted?,
+              trace_meta,
               attempt + 1,
               max_attempts
             )
@@ -507,8 +629,22 @@ defmodule Avcs.Agent.AvcsAgentClient do
     end
   end
 
-  defp do_stream_request(url, payload, settings, on_event, interrupted?) do
+  defp do_stream_request(
+         url,
+         payload,
+         settings,
+         on_event,
+         interrupted?,
+         trace_meta,
+         attempt,
+         max_attempts
+       ) do
     ensure_http_started()
+
+    trace_context = VercelApiTrace.context_from_opts(trace_meta)
+    trace_meta = trace_request_meta(:post, url, payload, trace_meta, attempt, max_attempts)
+    started_at_ms = System.monotonic_time(:millisecond)
+    VercelApiTrace.append_request_sent(trace_context, trace_meta)
 
     headers = [
       {~c"authorization", to_charlist("Bearer " <> settings.api_key)},
@@ -522,39 +658,153 @@ defmodule Avcs.Agent.AvcsAgentClient do
 
     case :httpc.request(:post, request, http_opts, opts) do
       {:ok, request_id} ->
-        collect_stream(request_id, "", empty_stream_acc(), payload, on_event, interrupted?)
+        collect_stream(
+          request_id,
+          "",
+          empty_stream_acc(),
+          payload,
+          on_event,
+          interrupted?,
+          trace_context,
+          trace_meta,
+          started_at_ms
+        )
 
       {:error, reason} ->
+        trace_request_failure(
+          trace_context,
+          trace_meta,
+          reason,
+          started_at_ms,
+          false,
+          retryable_stream_transport_error?(reason)
+        )
+
         stream_transport_error(reason, false)
     end
   end
 
-  defp collect_stream(request_id, buffer, acc, payload, on_event, interrupted?) do
+  defp collect_stream(
+         request_id,
+         buffer,
+         acc,
+         payload,
+         on_event,
+         interrupted?,
+         trace_context,
+         trace_meta,
+         started_at_ms
+       ) do
     if interrupted?.() do
       :httpc.cancel_request(request_id)
+
+      VercelApiTrace.append_request_interrupted(
+        trace_context,
+        trace_meta
+        |> Map.put(
+          :error_summary,
+          VercelApiTrace.transport_error_summary(:interrupted,
+            duration_ms: VercelApiTrace.duration_ms(started_at_ms),
+            committed: acc.committed?
+          )
+        )
+      )
+
       {:error, :interrupted}
     else
       receive do
         {:http, {^request_id, :stream_start, _headers}} ->
-          collect_stream(request_id, buffer, acc, payload, on_event, interrupted?)
+          collect_stream(
+            request_id,
+            buffer,
+            acc,
+            payload,
+            on_event,
+            interrupted?,
+            trace_context,
+            trace_meta,
+            started_at_ms
+          )
 
         {:http, {^request_id, :stream, chunk}} ->
           {buffer, acc} = consume_sse(buffer <> to_string(chunk), acc, on_event)
-          collect_stream(request_id, buffer, acc, payload, on_event, interrupted?)
+
+          collect_stream(
+            request_id,
+            buffer,
+            acc,
+            payload,
+            on_event,
+            interrupted?,
+            trace_context,
+            trace_meta,
+            started_at_ms
+          )
 
         {:http, {^request_id, :stream_end, _headers}} ->
           {_buffer, acc} = consume_sse(buffer <> "\n\n", acc, on_event)
+
+          VercelApiTrace.append_response_received(
+            trace_context,
+            "ok",
+            trace_meta
+            |> Map.put(
+              :response_summary,
+              VercelApiTrace.stream_response_summary(acc,
+                http_status: 200,
+                duration_ms: VercelApiTrace.duration_ms(started_at_ms),
+                committed: acc.committed?
+              )
+            )
+          )
+
           {:ok, finalize_stream_acc(acc)}
 
         {:http, {^request_id, {{_version, status, reason}, _headers, body}}}
         when status not in 200..299 ->
+          retryable? = not acc.committed? and status in @retryable_stream_statuses
+
+          VercelApiTrace.append_response_received(
+            trace_context,
+            "error",
+            trace_meta
+            |> Map.put(
+              :response_summary,
+              VercelApiTrace.response_summary(body,
+                http_status: status,
+                duration_ms: VercelApiTrace.duration_ms(started_at_ms),
+                committed: acc.committed?,
+                retryable: retryable?,
+                reason: to_string(reason)
+              )
+            )
+          )
+
           stream_http_error(status, reason, body, payload, acc.committed?)
 
         {:http, {^request_id, {:error, reason}}} ->
+          trace_request_failure(
+            trace_context,
+            trace_meta,
+            reason,
+            started_at_ms,
+            acc.committed?,
+            retryable_stream_transport_error?(reason)
+          )
+
           stream_transport_error(reason, acc.committed?)
       after
         request_timeout_ms() ->
           :httpc.cancel_request(request_id)
+
+          trace_request_timeout(
+            trace_context,
+            trace_meta,
+            started_at_ms,
+            acc.committed?,
+            not acc.committed?
+          )
+
           stream_timeout_error(acc.committed?)
       end
     end
@@ -585,6 +835,112 @@ defmodule Avcs.Agent.AvcsAgentClient do
 
   defp retryable_stream_transport_error?({:failed_connect, _reason}), do: true
   defp retryable_stream_transport_error?(reason), do: transient_stream_reason?(reason)
+
+  defp trace_meta(opts, payload, transport, extra \\ []) do
+    extra = Map.new(extra)
+    summary_opts = value(extra, :summary_opts) || []
+
+    request_summary =
+      value(extra, :request_summary) || VercelApiTrace.request_summary(payload, summary_opts)
+
+    %{
+      trace_context: VercelApiTrace.context_from_opts(opts),
+      transport: transport,
+      model:
+        value(payload, :model) || value(opts, :model) || value(opts, :image_model) ||
+          value(opts, :text_model),
+      stream: value(payload, :stream),
+      request_summary: request_summary
+    }
+  end
+
+  defp image_summary_opts(reference_images, mask_image, opts) do
+    reference_count = length(List.wrap(reference_images || []))
+    mask_present = not is_nil(mask_image)
+
+    [
+      reference_count: reference_count,
+      mask_present: mask_present,
+      file_count: reference_count + if(mask_present, do: 1, else: 0),
+      image_options: image_option_fields(opts)
+    ]
+  end
+
+  defp trace_request_meta(method, url, payload, trace_meta, attempt, max_attempts) do
+    %{
+      trace_context: value(trace_meta, :trace_context),
+      transport: value(trace_meta, :transport) || "http_json",
+      method: method |> to_string() |> String.upcase(),
+      endpoint: VercelApiTrace.endpoint_path(url),
+      model: value(trace_meta, :model) || value(payload, :model),
+      stream: value(trace_meta, :stream) || value(payload, :stream),
+      attempt: attempt,
+      max_attempts: max_attempts,
+      request_summary:
+        value(trace_meta, :request_summary) ||
+          VercelApiTrace.request_summary(payload, value(trace_meta, :summary_opts) || [])
+    }
+    |> compact()
+  end
+
+  defp trace_request_failure(
+         trace_context,
+         trace_meta,
+         reason,
+         started_at_ms,
+         committed?,
+         retryable?
+       ) do
+    if timeout_reason?(reason) do
+      trace_request_timeout(trace_context, trace_meta, started_at_ms, committed?, retryable?)
+    else
+      VercelApiTrace.append_request_failed(
+        trace_context,
+        trace_meta
+        |> Map.put(
+          :error_summary,
+          VercelApiTrace.transport_error_summary(reason,
+            duration_ms: VercelApiTrace.duration_ms(started_at_ms),
+            committed: committed?,
+            retryable: retryable?
+          )
+        )
+      )
+    end
+  end
+
+  defp trace_request_timeout(trace_context, trace_meta, started_at_ms, committed?, retryable?) do
+    VercelApiTrace.append_request_timeout(
+      trace_context,
+      trace_meta
+      |> Map.put(
+        :error_summary,
+        VercelApiTrace.transport_error_summary(:timeout,
+          duration_ms: VercelApiTrace.duration_ms(started_at_ms),
+          committed: committed?,
+          retryable: retryable?
+        )
+      )
+    )
+  end
+
+  defp timeout_reason?(reason) when reason in [:timeout, :etimedout], do: true
+
+  defp timeout_reason?(reason) when is_tuple(reason) do
+    reason
+    |> Tuple.to_list()
+    |> Enum.any?(&timeout_reason?/1)
+  end
+
+  defp timeout_reason?(reason) when is_list(reason), do: Enum.any?(reason, &timeout_reason?/1)
+
+  defp timeout_reason?(reason) when is_binary(reason) do
+    reason
+    |> String.downcase()
+    |> String.contains?("timeout")
+  end
+
+  defp timeout_reason?(_reason), do: false
 
   defp transient_stream_reason?(reason)
        when reason in [

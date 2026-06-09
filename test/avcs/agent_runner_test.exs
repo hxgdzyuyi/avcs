@@ -832,6 +832,17 @@ defmodule Avcs.Agent.RunnerTest do
                items,
                &(&1["type"] == "assistant_message" and &1["content"] == "Recovered by retry.")
              )
+
+      {:ok, events} =
+        Avcs.Trace.list_events(project, thread["id"], turn_id: created["turn"]["id"])
+
+      vercel_events = Enum.filter(events, &(&1["scope"] == "vercel_api"))
+      assert Enum.any?(vercel_events, &(&1["event_name"] == "request_timeout"))
+
+      assert Enum.any?(
+               vercel_events,
+               &(&1["event_name"] == "response_received" and &1["status"] == "ok")
+             )
     after
       HTTPTestServer.stop(server)
     end
@@ -904,7 +915,17 @@ defmodule Avcs.Agent.RunnerTest do
     assert tool_names(tools) == ~w(image_gen read ls find grep bash)
 
     assert_receive {:avcs_agent_generate_image, "A precise Avcs test image", image_opts}, 1_000
+    thread_id = thread["id"]
+    turn_id = created["turn"]["id"]
+
     assert Keyword.get(image_opts, :count) == 1
+
+    assert %{
+             thread_id: ^thread_id,
+             turn_id: ^turn_id,
+             remote_item_id: "tool-image-1"
+           } =
+             Keyword.fetch!(image_opts, :trace_context)
 
     assert_receive %Phoenix.Socket.Broadcast{
                      event: "tool:updated",

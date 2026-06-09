@@ -286,7 +286,17 @@ defmodule Avcs.Agent.Harness.AvcsAgent do
     client().chat_completion_stream(
       state.messages,
       Avcs.Agent.Tools.Registry.schemas(tool_opts(state)),
-      [model: state.settings.text_model],
+      [
+        model: state.settings.text_model,
+        trace_context: %{
+          project: state.project,
+          thread_id: state.avcs_thread_id,
+          turn_id: state.avcs_turn_id,
+          remote_thread_id: state.remote_thread_id,
+          remote_turn_id: state.remote_turn_id,
+          model: state.settings.text_model
+        }
+      ],
       state.on_event,
       &interrupted?/0
     )

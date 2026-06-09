@@ -385,6 +385,7 @@ function SnapshotView({
 function TracingFilters({ filters, options, disabled, onChange }) {
   const hasFilters = Boolean(filters.query || filters.scope || filters.status || filters.eventName);
   const hasCodexRpcScope = options.scopes.includes("codex_rpc");
+  const hasVercelApiScope = options.scopes.includes("vercel_api");
 
   function setFilter(key, value) {
     onChange((current) => ({ ...current, [key]: value }));
@@ -458,6 +459,16 @@ function TracingFilters({ filters, options, disabled, onChange }) {
           onClick={() => setFilter("scope", filters.scope === "codex_rpc" ? "" : "codex_rpc")}
         >
           Codex RPC
+        </button>
+      ) : null}
+      {hasVercelApiScope ? (
+        <button
+          type="button"
+          className={`tracing-filter-reset${filters.scope === "vercel_api" ? " active" : ""}`}
+          disabled={disabled}
+          onClick={() => setFilter("scope", filters.scope === "vercel_api" ? "" : "vercel_api")}
+        >
+          Vercel API
         </button>
       ) : null}
     </div>
@@ -780,13 +791,21 @@ function EventDetail({ event }) {
             <Fact label="RPC ID" value={codexRpcPayloadValue(event, "rpc_id")} />
           </>
         ) : null}
+        {event.scope === "vercel_api" ? (
+          <>
+            <Fact label="API Method" value={vercelApiPayloadValue(event, "method")} />
+            <Fact label="Endpoint" value={vercelApiPayloadValue(event, "endpoint")} />
+            <Fact label="Direction" value={vercelApiPayloadValue(event, "direction")} />
+            <Fact label="Attempt" value={vercelApiAttempt(event)} />
+          </>
+        ) : null}
         <Fact label="Thread ID" value={event.thread_id} />
         <Fact label="Turn ID" value={event.turn_id} />
         <Fact label="Item ID" value={event.item_id} />
         <Fact label="Created" value={formatTime(event.created_at)} />
-        <Fact label="Codex Thread" value={event.remote_thread_id} />
-        <Fact label="Codex Turn" value={event.remote_turn_id} />
-        <Fact label="Codex Item" value={event.remote_item_id} />
+        <Fact label="Remote Thread" value={event.remote_thread_id} />
+        <Fact label="Remote Turn" value={event.remote_turn_id} />
+        <Fact label="Remote Item" value={event.remote_item_id} />
       </section>
 
       <section className="tracing-section">
@@ -1299,9 +1318,9 @@ function timelineGroupMarkdown(group) {
       index + 1,
       markdownTableCell(event.created_at),
       markdownTableCell(event.scope),
-      markdownTableCell(codexRpcPayloadValue(event, "method")),
-      markdownTableCell(codexRpcPayloadValue(event, "direction")),
-      markdownTableCell(codexRpcPayloadValue(event, "rpc_id")),
+      markdownTableCell(traceProtocolValue(event, "method")),
+      markdownTableCell(traceProtocolValue(event, "direction")),
+      markdownTableCell(traceProtocolValue(event, "id_or_attempt")),
       markdownTableCell(event.event_name),
       markdownTableCell(event.status),
       markdownTableCell(event.item_id),
@@ -1315,9 +1334,10 @@ function timelineGroupMarkdown(group) {
     `- Event ID: ${event.id || "-"}`,
     `- Created: ${event.created_at || "-"}`,
     `- Scope: ${event.scope || "-"}`,
-    `- RPC Method: ${codexRpcPayloadValue(event, "method") || "-"}`,
-    `- Direction: ${codexRpcPayloadValue(event, "direction") || "-"}`,
-    `- RPC ID: ${codexRpcPayloadValue(event, "rpc_id") || "-"}`,
+    `- Method: ${traceProtocolValue(event, "method") || "-"}`,
+    `- Endpoint: ${traceProtocolValue(event, "endpoint") || "-"}`,
+    `- Direction: ${traceProtocolValue(event, "direction") || "-"}`,
+    `- ID/Attempt: ${traceProtocolValue(event, "id_or_attempt") || "-"}`,
     `- Status: ${event.status || "-"}`,
     `- Item ID: ${event.item_id || "-"}`,
     `- Remote Turn ID: ${event.remote_turn_id || "-"}`,
@@ -1343,7 +1363,7 @@ function timelineGroupMarkdown(group) {
     "",
     "## Timeline",
     "",
-    "# | Created | Scope | RPC Method | Direction | RPC ID | Event | Status | Item ID | Remote Item ID",
+    "# | Created | Scope | Method | Direction | ID/Attempt | Event | Status | Item ID | Remote Item ID",
     "--- | --- | --- | --- | --- | --- | --- | --- | --- | ---",
     ...timelineRows,
     "",
@@ -1363,7 +1383,11 @@ function markdownTableCell(value) {
 }
 
 function traceEventSubtitle(event) {
-  return [event.scope, codexRpcSummary(event), event.status, formatTime(event.created_at)].filter(Boolean).join(" · ");
+  return [event.scope, traceProtocolSummary(event), event.status, formatTime(event.created_at)].filter(Boolean).join(" · ");
+}
+
+function traceProtocolSummary(event) {
+  return codexRpcSummary(event) || vercelApiSummary(event);
 }
 
 function codexRpcSummary(event) {
@@ -1378,6 +1402,43 @@ function codexRpcSummary(event) {
 function codexRpcPayloadValue(event, key) {
   if (event?.scope !== "codex_rpc" || !event.payload || typeof event.payload !== "object") return "";
   return event.payload[key] ?? "";
+}
+
+function vercelApiSummary(event) {
+  if (event?.scope !== "vercel_api") return "";
+
+  const method = vercelApiPayloadValue(event, "method");
+  const endpoint = vercelApiPayloadValue(event, "endpoint");
+  const direction = vercelApiPayloadValue(event, "direction");
+  const attempt = vercelApiAttempt(event);
+  return [direction, method, endpoint, attempt ? `#${attempt}` : ""].filter(Boolean).join(" ");
+}
+
+function vercelApiPayloadValue(event, key) {
+  if (event?.scope !== "vercel_api" || !event.payload || typeof event.payload !== "object") return "";
+  return event.payload[key] ?? "";
+}
+
+function vercelApiAttempt(event) {
+  const attempt = vercelApiPayloadValue(event, "attempt");
+  const maxAttempts = vercelApiPayloadValue(event, "max_attempts");
+  if (!attempt) return "";
+  return maxAttempts && maxAttempts !== attempt ? `${attempt}/${maxAttempts}` : `${attempt}`;
+}
+
+function traceProtocolValue(event, key) {
+  if (event?.scope === "codex_rpc") {
+    if (key === "id_or_attempt") return codexRpcPayloadValue(event, "rpc_id");
+    if (key === "endpoint") return "";
+    return codexRpcPayloadValue(event, key);
+  }
+
+  if (event?.scope === "vercel_api") {
+    if (key === "id_or_attempt") return vercelApiAttempt(event);
+    return vercelApiPayloadValue(event, key);
+  }
+
+  return "";
 }
 
 function traceEventSearchText(event) {

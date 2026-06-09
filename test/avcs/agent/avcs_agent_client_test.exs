@@ -470,6 +470,202 @@ defmodule Avcs.Agent.AvcsAgentClientTest do
     end
   end
 
+  test "traces streaming chat completions with safe metadata" do
+    with_trace_project(fn project, thread_id, turn_id, trace_context ->
+      server = HTTPTestServer.start!([{:stream, successful_text_stream("Traced response.")}])
+      prompt = "do-not-leak-vercel-trace-prompt"
+
+      try do
+        assert {:ok, result} =
+                 AvcsAgentClient.chat_completion_stream(
+                   [%{"role" => "user", "content" => prompt}],
+                   [],
+                   stream_opts(server.port) ++ [trace_context: trace_context],
+                   stream_event_handler(self()),
+                   fn -> false end
+                 )
+
+        assert result.assistant_text == "Traced response."
+        assert_receive {:http_request, _request}, 1_000
+
+        {:ok, events} = Avcs.Trace.list_events(project, thread_id, turn_id: turn_id)
+        vercel_events = Enum.filter(events, &(&1["scope"] == "vercel_api"))
+
+        assert request_sent =
+                 Enum.find(vercel_events, &(&1["event_name"] == "request_sent"))
+
+        assert request_sent["status"] == "sent"
+        assert get_in(request_sent, ["payload", "transport"]) == "sse"
+        assert get_in(request_sent, ["payload", "method"]) == "POST"
+        assert get_in(request_sent, ["payload", "endpoint"]) == "/v1/chat/completions"
+        assert get_in(request_sent, ["payload", "model"]) == "fake-text-model"
+        assert get_in(request_sent, ["payload", "stream"]) == true
+        assert get_in(request_sent, ["payload", "request_summary", "message_count"]) == 1
+        assert get_in(request_sent, ["payload", "request_summary", "tool_count"]) == 0
+
+        assert is_integer(
+                 get_in(request_sent, ["payload", "request_summary", "request_size_bytes"])
+               )
+
+        assert response_received =
+                 Enum.find(
+                   vercel_events,
+                   &(&1["event_name"] == "response_received" and &1["status"] == "ok")
+                 )
+
+        assert get_in(response_received, ["payload", "response_summary", "http_status"]) == 200
+
+        assert get_in(
+                 response_received,
+                 ["payload", "response_summary", "remote_response_id"]
+               ) == "chatcmpl-test"
+
+        assert get_in(response_received, ["payload", "response_summary", "response_model"]) ==
+                 "fake-text-model"
+
+        encoded = Jason.encode!(vercel_events)
+        refute encoded =~ prompt
+        refute encoded =~ "test-key"
+        refute String.downcase(encoded) =~ "authorization"
+      after
+        HTTPTestServer.stop(server)
+      end
+    end)
+  end
+
+  test "traces stream retry attempts before commit" do
+    Application.put_env(:avcs, :avcs_agent_stream_retry_attempts, 2)
+    Application.put_env(:avcs, :avcs_agent_stream_retry_backoff_ms, [10])
+    Application.put_env(:avcs, :avcs_agent_request_timeout_ms, 40)
+
+    with_trace_project(fn project, thread_id, turn_id, trace_context ->
+      server =
+        HTTPTestServer.start!([
+          {:sleep, 120},
+          {:stream, successful_text_stream("Recovered with trace.")}
+        ])
+
+      try do
+        assert {:ok, result} =
+                 AvcsAgentClient.chat_completion_stream(
+                   [%{"role" => "user", "content" => "Retry trace"}],
+                   [],
+                   stream_opts(server.port) ++ [trace_context: trace_context],
+                   stream_event_handler(self()),
+                   fn -> false end
+                 )
+
+        assert result.assistant_text == "Recovered with trace."
+        assert_receive {:http_request, _first_request}, 1_000
+        assert_receive {:http_request, _second_request}, 1_000
+
+        {:ok, events} = Avcs.Trace.list_events(project, thread_id, turn_id: turn_id)
+        vercel_events = Enum.filter(events, &(&1["scope"] == "vercel_api"))
+
+        assert timeout_event =
+                 Enum.find(vercel_events, &(&1["event_name"] == "request_timeout"))
+
+        assert timeout_event["status"] == "timeout"
+        assert get_in(timeout_event, ["payload", "attempt"]) == 1
+        assert get_in(timeout_event, ["payload", "max_attempts"]) == 2
+        assert get_in(timeout_event, ["payload", "error_summary", "retryable"]) == true
+
+        assert success_event =
+                 Enum.find(
+                   vercel_events,
+                   &(&1["event_name"] == "response_received" and &1["status"] == "ok")
+                 )
+
+        assert get_in(success_event, ["payload", "attempt"]) == 2
+        assert get_in(success_event, ["payload", "max_attempts"]) == 2
+      after
+        HTTPTestServer.stop(server)
+      end
+    end)
+  end
+
+  test "traces non-2xx stream responses as bounded errors" do
+    with_trace_project(fn project, thread_id, turn_id, trace_context ->
+      body = Jason.encode!(%{"error" => %{"message" => "Invalid request for trace"}})
+      server = HTTPTestServer.start!([{:http_error, 400, "Bad Request", body}])
+
+      try do
+        assert {:error, message} =
+                 AvcsAgentClient.chat_completion_stream(
+                   [%{"role" => "user", "content" => "Bad trace"}],
+                   [],
+                   stream_opts(server.port) ++ [trace_context: trace_context],
+                   stream_event_handler(self()),
+                   fn -> false end
+                 )
+
+        assert message == "AI Gateway request failed with HTTP 400: Invalid request for trace"
+        assert_receive {:http_request, _request}, 1_000
+
+        {:ok, events} = Avcs.Trace.list_events(project, thread_id, turn_id: turn_id)
+
+        assert error_event =
+                 Enum.find(
+                   events,
+                   &(&1["scope"] == "vercel_api" and
+                       &1["event_name"] == "response_received" and &1["status"] == "error")
+                 )
+
+        assert get_in(error_event, ["payload", "response_summary", "http_status"]) == 400
+
+        assert get_in(error_event, ["payload", "response_summary", "error_message"]) ==
+                 "Invalid request for trace"
+      after
+        HTTPTestServer.stop(server)
+      end
+    end)
+  end
+
+  test "traces image generation without storing prompt or base64" do
+    with_trace_project(fn project, thread_id, turn_id, trace_context ->
+      prompt = "do-not-leak-image-prompt"
+      response_body = image_api_response("image-trace-response")
+      server = start_http_server!(response_body)
+
+      try do
+        assert {:ok, result} =
+                 AvcsAgentClient.generate_image(prompt,
+                   base_url: "http://127.0.0.1:#{server.port}/v1",
+                   api_key: "test-key",
+                   image_model: "openai/gpt-image-2",
+                   trace_context: trace_context
+                 )
+
+        assert result.raw_id == "image-trace-response"
+        assert_receive {:http_request, request}, 1_000
+        assert request.path == "/v1/images/generations"
+
+        {:ok, events} = Avcs.Trace.list_events(project, thread_id, turn_id: turn_id)
+
+        assert response_event =
+                 Enum.find(
+                   events,
+                   &(&1["scope"] == "vercel_api" and
+                       &1["event_name"] == "response_received" and &1["status"] == "ok")
+                 )
+
+        assert get_in(response_event, ["payload", "endpoint"]) == "/v1/images/generations"
+
+        assert get_in(response_event, ["payload", "response_summary", "remote_response_id"]) ==
+                 "image-trace-response"
+
+        assert get_in(response_event, ["payload", "response_summary", "image_count"]) == 1
+
+        encoded = Jason.encode!(Enum.filter(events, &(&1["scope"] == "vercel_api")))
+        refute encoded =~ prompt
+        refute encoded =~ Base.encode64(@png)
+        refute encoded =~ "data:image"
+      after
+        stop_http_server(server)
+      end
+    end)
+  end
+
   defp image_api_response(id) do
     Jason.encode!(%{
       "id" => id,
@@ -553,6 +749,39 @@ defmodule Avcs.Agent.AvcsAgentClientTest do
 
   defp stream_event_handler(parent) do
     fn event -> send(parent, {:stream_event, event}) end
+  end
+
+  defp with_trace_project(fun) do
+    project_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "avcs-agent-client-trace-#{System.unique_integer([:positive])}"
+      )
+
+    File.rm_rf!(project_dir)
+
+    try do
+      {:ok, project} = Avcs.Projects.open_project(project_dir)
+      {:ok, thread} = Avcs.Threads.create_thread(project, "Vercel API trace")
+
+      {:ok, created} =
+        Avcs.Turns.create_user_turn(project, thread["id"], "Trace Vercel API", [])
+
+      turn_id = created["turn"]["id"]
+
+      trace_context = %{
+        project: project,
+        thread_id: thread["id"],
+        turn_id: turn_id,
+        remote_thread_id: "avcs-agent-thread-trace",
+        remote_turn_id: "avcs-agent-turn-trace",
+        model: "fake-text-model"
+      }
+
+      fun.(project, thread["id"], turn_id, trace_context)
+    after
+      File.rm_rf!(project_dir)
+    end
   end
 
   defp timeout_reason?(:timeout), do: true

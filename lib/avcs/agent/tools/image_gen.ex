@@ -130,6 +130,9 @@ defmodule Avcs.Agent.Tools.ImageGen do
     project = value(context, :project)
     thread_id = value(context, :thread_id)
     turn_id = value(context, :turn_id)
+    remote_thread_id = value(context, :remote_thread_id)
+    remote_turn_id = value(context, :remote_turn_id)
+    tool_call_id = value(context, :tool_call_id)
     image_model = value(context, :image_model)
     progress = value(context, :progress)
     reference_asset_ids = args.reference_asset_ids || []
@@ -153,7 +156,16 @@ defmodule Avcs.Agent.Tools.ImageGen do
              output_compression: args.output_compression,
              background: args.background,
              moderation: args.moderation,
-             base_url: value(context, :base_url)
+             base_url: value(context, :base_url),
+             trace_context: %{
+               project: project,
+               thread_id: thread_id,
+               turn_id: turn_id,
+               remote_thread_id: remote_thread_id,
+               remote_turn_id: remote_turn_id,
+               remote_item_id: tool_call_id,
+               model: image_model
+             }
            ),
          _ <- emit_progress(progress, "updated", %{"stage" => "saving_images"}),
          {:ok, results} <- persist_images(project, thread_id, turn_id, args, response.images) do
