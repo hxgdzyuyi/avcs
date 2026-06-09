@@ -280,9 +280,9 @@ Composer 使用 CodeMirror，承载自然语言 prompt。
 
 需要的数据：
 
-1. Thread：`id`、`title`、`codex_thread_id`、`status`、`default_model`、`default_effort`、`default_approval_policy`、`default_sandbox_mode`、`created_at`、`updated_at`。
-2. Turn：`id`、`thread_id`、`codex_turn_id`、`status`、`user_text`、`model`、`effort`、`approval_policy`、`sandbox_mode`、`created_at`、`updated_at`、`completed_at`、`error`。
-3. Item：`id`、`thread_id`、`turn_id`、`codex_item_id`、`type`、`role`、`content`、`payload`、`status`、`created_at`、`updated_at`。
+1. Thread：`id`、`title`、`agent_harness`、`remote_thread_id`、`status`、`default_model`、`default_effort`、`default_approval_policy`、`default_sandbox_mode`、`created_at`、`updated_at`。
+2. Turn：`id`、`thread_id`、`agent_harness`、`remote_turn_id`、`remote_model`、`status`、`user_text`、`model`、`effort`、`approval_policy`、`sandbox_mode`、`created_at`、`updated_at`、`completed_at`、`error`。
+3. Item：`id`、`thread_id`、`turn_id`、`remote_item_id`、`tool_name`、`type`、`role`、`content`、`payload`、`status`、`created_at`、`updated_at`。
 4. Asset link：`asset_id`、`thread_id`、`turn_id`、`item_id`、`source`。
 5. Runtime state：当前运行的 `thread_id`、`turn_id`、流式文本、工具状态和错误。
 6. 历史编辑路径状态：`turns`、`items`、`asset_links` 和 `board_items` 的 `invalidated_at`、`invalidated_by_item_id`；默认查询和 UI 只展示未失效路径。

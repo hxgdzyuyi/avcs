@@ -303,7 +303,7 @@ defmodule Avcs.LocalFirstTest do
 
     assert {:ok, []} = Avcs.Turns.list_items(project, thread["id"])
     assert {:ok, info} = Avcs.Projects.project_sqlite_info(project)
-    assert info.sqlite_info.schema_version == "5"
+    assert info.sqlite_info.schema_version == "6"
 
     assert {:ok, created} =
              Avcs.Turns.create_user_turn(project, thread["id"], "After migration", [])
@@ -428,7 +428,7 @@ defmodule Avcs.LocalFirstTest do
 
     assert edited["item"]["content"] == "Revised prompt"
     assert edited["turn"]["status"] == "queued"
-    assert edited["turn"]["codex_turn_id"] == nil
+    assert edited["turn"]["remote_turn_id"] == nil
     assert edited["rollback_turn_count"] == 2
     assert edited["invalidated_turn_ids"] == [second["turn"]["id"]]
     assert first_assistant["id"] in edited["invalidated_item_ids"]
@@ -546,27 +546,27 @@ defmodule Avcs.LocalFirstTest do
     assert {:ok, created} = Avcs.Turns.create_user_turn(project, thread["id"], "Run tool", [])
 
     assert {:ok, running_item} =
-             Avcs.Turns.upsert_codex_item(project,
+             Avcs.Turns.upsert_remote_item(project,
                turn_id: created["turn"]["id"],
                thread_id: thread["id"],
-               codex_item_id: "tool-1",
+               remote_item_id: "tool-1",
                type: "tool_call",
                role: "tool",
                content: "echo start",
                status: "running",
-               payload: %{codex_item: %{"id" => "tool-1", "status" => "running"}}
+               payload: %{remote_item: %{"id" => "tool-1", "status" => "running"}}
              )
 
     assert {:ok, completed_item} =
-             Avcs.Turns.upsert_codex_item(project,
+             Avcs.Turns.upsert_remote_item(project,
                turn_id: created["turn"]["id"],
                thread_id: thread["id"],
-               codex_item_id: "tool-1",
+               remote_item_id: "tool-1",
                type: "tool_result",
                role: "tool",
                content: "echo done",
                status: "completed",
-               payload: %{codex_item: %{"id" => "tool-1", "status" => "completed"}}
+               payload: %{remote_item: %{"id" => "tool-1", "status" => "completed"}}
              )
 
     assert running_item["id"] == completed_item["id"]
@@ -574,10 +574,10 @@ defmodule Avcs.LocalFirstTest do
     {:ok, items} = Avcs.Turns.list_items(project, thread["id"])
 
     assert [%{"type" => "tool_result", "status" => "completed"}] =
-             Enum.filter(items, &(&1["codex_item_id"] == "tool-1"))
+             Enum.filter(items, &(&1["remote_item_id"] == "tool-1"))
 
     assert {:ok, events} = Avcs.Trace.list_events(project, thread["id"])
-    tool_events = Enum.filter(events, &(&1["codex_item_id"] == "tool-1"))
+    tool_events = Enum.filter(events, &(&1["remote_item_id"] == "tool-1"))
 
     assert Enum.any?(
              tool_events,
@@ -599,7 +599,7 @@ defmodule Avcs.LocalFirstTest do
                scope: "item",
                event_name: "item_completed",
                thread_id: thread["id"],
-               codex_item_id: "image-1",
+               remote_item_id: "image-1",
                status: "completed",
                payload: %{"item" => %{"type" => "imageGeneration", "result" => large_result}},
                raw: %{
@@ -609,7 +609,7 @@ defmodule Avcs.LocalFirstTest do
              })
 
     assert {:ok, events} = Avcs.Trace.list_events(project, thread["id"])
-    event = Enum.find(events, &(&1["codex_item_id"] == "image-1"))
+    event = Enum.find(events, &(&1["remote_item_id"] == "image-1"))
 
     assert get_in(event, ["payload", "item", "result", "omitted"]) == true
     assert get_in(event, ["raw", "params", "item", "result", "omitted"]) == true
@@ -627,6 +627,25 @@ defmodule Avcs.LocalFirstTest do
   } do
     outside = Path.expand(Path.join(project_dir, "../outside.png"))
     assert {:error, :outside_project} = Avcs.Projects.relative_to_project(project, outside)
+  end
+
+  test "project path boundary accepts macOS private var aliases", %{
+    project: project,
+    project_dir: project_dir
+  } do
+    path = Path.join([project_dir, "work", "reference.png"])
+    File.write!(path, @png)
+
+    case macos_private_alias(path) do
+      nil ->
+        :ok
+
+      alias_path ->
+        assert {:ok, "work/reference.png"} =
+                 Avcs.Projects.relative_to_project(project, alias_path)
+
+        assert Avcs.Projects.inside?(alias_path, project_dir)
+    end
   end
 
   test "project archive hides global index entry without deleting project files", %{
@@ -781,7 +800,7 @@ defmodule Avcs.LocalFirstTest do
                CREATE TABLE turns (
                  id TEXT PRIMARY KEY,
                  thread_id TEXT NOT NULL,
-                 codex_turn_id TEXT,
+                 remote_turn_id TEXT,
                  status TEXT NOT NULL,
                  user_text TEXT,
                  model TEXT,
@@ -803,5 +822,20 @@ defmodule Avcs.LocalFirstTest do
 
                :ok
              end)
+  end
+
+  defp macos_private_alias(path) do
+    if match?({:unix, :darwin}, :os.type()) do
+      cond do
+        path == "/var" or String.starts_with?(path, "/var/") ->
+          String.replace_prefix(path, "/var", "/private/var")
+
+        path == "/private/var" or String.starts_with?(path, "/private/var/") ->
+          String.replace_prefix(path, "/private/var", "/var")
+
+        true ->
+          nil
+      end
+    end
   end
 end

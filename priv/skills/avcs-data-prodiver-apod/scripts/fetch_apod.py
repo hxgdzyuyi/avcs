@@ -7,9 +7,11 @@ import argparse
 import json
 import re
 import sys
+import time
 from datetime import datetime
+from http.client import IncompleteRead
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlsplit, unquote
 from urllib.request import Request, urlopen
@@ -18,6 +20,9 @@ from urllib.request import Request, urlopen
 APOD_API = "https://api.nasa.gov/planetary/apod"
 APOD_WEB_BASE = "https://apod.nasa.gov/apod/"
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+_HTTP_RETRIES = 3
+_IMAGE_DOWNLOAD_RETRIES = 4
+_RETRY_DELAY_SECONDS = 0.5
 
 
 def _parse_args() -> argparse.Namespace:
@@ -44,7 +49,23 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _http_get(url: str) -> Tuple[bytes, str]:
+def _http_get(url: str, retries: int = _HTTP_RETRIES) -> Tuple[bytes, str]:
+    last_error: Exception | None = None
+
+    for attempt in range(1, max(retries, 1) + 1):
+        try:
+            return _http_get_once(url)
+        except (IncompleteRead, URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(_RETRY_DELAY_SECONDS * attempt)
+
+    raise RuntimeError(
+        f"Network error while requesting {url} after {max(retries, 1)} attempts: {last_error}"
+    )
+
+
+def _http_get_once(url: str) -> Tuple[bytes, str]:
     req = Request(
         url,
         headers={
@@ -59,8 +80,6 @@ def _http_get(url: str) -> Tuple[bytes, str]:
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
         raise RuntimeError(f"HTTP {exc.code} while requesting {url}: {body}") from exc
-    except URLError as exc:
-        raise RuntimeError(f"Network error while requesting {url}: {exc}") from exc
 
 
 def _build_api_url(date: str | None, api_key: str) -> str:
@@ -249,9 +268,34 @@ def _fetch_web_payload(date: str | None) -> Tuple[Dict[str, Any], Optional[str]]
 
 
 def _download_image(url: str, path: Path) -> None:
-    data, _ = _http_get(url)
+    data, _ = _http_get(url, retries=_IMAGE_DOWNLOAD_RETRIES)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def _image_url_candidates(
+    payload: Dict[str, Any],
+    image_url: Optional[str],
+    prefer_hd: bool,
+    source: str,
+) -> List[str]:
+    candidates: List[str] = []
+
+    def append(url: Any) -> None:
+        if not isinstance(url, str) or not url:
+            return
+        if url not in candidates:
+            candidates.append(url)
+
+    if prefer_hd:
+        append(payload.get("hdurl"))
+
+    append(image_url)
+
+    if source != "web_scrape":
+        append(payload.get("url"))
+
+    return candidates
 
 
 def _make_output(
@@ -278,7 +322,7 @@ def _make_output(
     }
 
     if image_path is not None and image_url_used is not None:
-        data["image_path"] = str(image_path.resolve())
+        data["image_path"] = str(image_path)
         data["image_url_used"] = image_url_used
 
     return {
@@ -377,13 +421,9 @@ def main() -> int:
         )
         return 4
 
-    if image_url is None:
-        image_url = payload.get("url")
-        hd_url = payload.get("hdurl")
-        if args.prefer_hd and isinstance(hd_url, str) and hd_url:
-            image_url = hd_url
+    image_urls = _image_url_candidates(payload, image_url, args.prefer_hd, source)
 
-    if not image_url:
+    if not image_urls:
         _safe_json_print(
             _make_output(
                 payload=payload,
@@ -398,13 +438,28 @@ def main() -> int:
 
     date_value = payload.get("date") or args.date or _now_date()
     slug = _slugify(str(payload.get("title") or "apod"), 20)
-    out_dir = Path(args.out_dir).expanduser().resolve()
-    filename = f"apod-{date_value}-{slug}{_guess_suffix(image_url)}"
-    image_path = out_dir / filename
+    out_dir = Path(args.out_dir).expanduser()
+    if not out_dir.is_absolute():
+        out_dir = Path.cwd() / out_dir
 
-    try:
-        _download_image(image_url, image_path)
-    except Exception as exc:
+    image_path: Path | None = None
+    image_url_used: str | None = None
+    download_errors: List[str] = []
+
+    for candidate_url in image_urls:
+        candidate_path = out_dir / f"apod-{date_value}-{slug}{_guess_suffix(candidate_url)}"
+
+        try:
+            _download_image(candidate_url, candidate_path)
+        except Exception as exc:
+            download_errors.append(f"{candidate_url}: {exc}")
+            continue
+
+        image_path = candidate_path
+        image_url_used = candidate_url
+        break
+
+    if image_path is None or image_url_used is None:
         _safe_json_print(
             _make_output(
                 payload=payload,
@@ -412,7 +467,7 @@ def main() -> int:
                 source=source,
                 api_url=api_url,
                 reason="image_download_failed",
-                error=str(exc),
+                error="; ".join(download_errors) or "No image URL could be downloaded.",
             )
         )
         return 6
@@ -424,7 +479,7 @@ def main() -> int:
             source=source,
             api_url=api_url,
             image_path=image_path,
-            image_url_used=image_url,
+            image_url_used=image_url_used,
         )
     )
     return 0

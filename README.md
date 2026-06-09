@@ -8,11 +8,14 @@ AI Visual Content Studio → Avcs
 
 ## Summary
 
-Avcs is a studio tool that uses Codex to generate images.
+Avcs is a local-first visual content studio. It can use Codex Agent through
+`codex app-server`, or AvcsAgent through Vercel AI Gateway when Codex is not
+available.
 
 ## Requirements
 
-- Install [Codex CLI](https://developers.openai.com/codex/cli) (required to start `codex app-server` and run local agent workflows).
+- Install [Codex CLI](https://developers.openai.com/codex/cli) to use the Codex Agent harness.
+- Configure a Vercel AI Gateway API key in `/web/settings` to use the AvcsAgent harness.
 
 ## Usage
 
@@ -21,11 +24,11 @@ Avcs is a studio tool that uses Codex to generate images.
 
 ## Architecture
 
-Avcs is a local-first web app. Elixir/Phoenix is the single local backend boundary for
-state, files, SQLite, and Codex agent access; the React frontend never reads the
-local filesystem, SQLite, or `codex app-server` directly. Desktop packaging can
-use a Tauri shell with an ElixirKit-style bridge to start Phoenix and open the
-web UI.
+Avcs is a local-first web app. Elixir/Phoenix is the single local backend
+boundary for state, files, SQLite, and Agent access; the React frontend never
+reads the local filesystem, SQLite, `codex app-server`, or Vercel AI Gateway
+directly. Desktop packaging can use a Tauri shell with an ElixirKit-style bridge
+to start Phoenix and open the web UI.
 
 ```text
 ┌────────────────────────── browser / Tauri shell ───────────────────────────┐
@@ -36,19 +39,29 @@ web UI.
 ┌────────────────────────── Elixir/Phoenix + React ──────────────────────────┐
 │ UI, WebSocket channels, HTTP APIs, app boundary                            │
 └──────────────────────────┬───────────────────────────────────────┬─────────┘
-                           │                 stdio:// JSONL        │
+                           │                Agent Harness          │
                            ▼                                       ▼
 ┌────────────────────────────────────────────────────┐  ┌────────────────────┐
-│ SQLite                                             │  │ codex app-server   │
-└────────────┬───────────────────────────┬───────────┘  └──────────┬─────────┘
-             │                           │                         │
+│ SQLite                                             │  │ Codex Agent        │
+└────────────┬───────────────────────────┬───────────┘  │ or AvcsAgent       │
+             │                           │              └──────────┬─────────┘
              ▼                           ▼                         ▼
 ┌────────────────────────┐  ┌────────────────────────┐  ┌────────────────────┐
-│ global DB              │  │ project DB + files     │  │ Codex Agent        │
-│ ~/.avcs/avcs.sqlite3   │  │ .avcs/project.sqlite3  │  │ image_gen          │
-│                        │  │ work/, output/         │  │ tool events        │
+│ global DB              │  │ project DB + files     │  │ image generation   │
+│ ~/.avcs/avcs.sqlite3   │  │ .avcs/project.sqlite3  │  │ tool events        │
+│ settings + secrets     │  │ work/, output/         │  │ text streaming     │
 └────────────────────────┘  └────────────────────────┘  └────────────────────┘
 ```
+
+The `/web/settings` page controls the global harness mode:
+`codex`, `auto`, or `avcs_agent`. The default is `codex`. `auto` prefers Codex
+and falls back to AvcsAgent when Codex is unavailable and the gateway key is
+configured.
+
+Codex Agent uses Codex built-in `image_gen`. AvcsAgent uses the Avcs backend
+`image_gen` tool, which writes generated files to the current project
+`output/` directory and then records assets, chat items, and board items through
+Phoenix.
 
 
 ## Why Avcs
@@ -99,6 +112,6 @@ month and day.
 Avcs keeps generated and imported visuals on a freeform Output board. A project
 can collect poster drafts, icon explorations, typography tests, annotated
 screenshots, and banner variants in one workspace, then select any image for
-preview or reuse as a reference in the next Codex turn.
+preview or reuse as a reference in the next Agent turn.
 
 <img src="docs/assets/demo-02-many-case.webp" alt="Output board with many generated visual cases" />

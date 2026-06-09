@@ -4,12 +4,9 @@ defmodule Avcs.Agent.Runner do
   require Logger
 
   def submit(project, thread_id, text, asset_ids, turn_settings \\ %{}) do
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
-
-    case active_codex_turn(codex_client, project, thread_id) do
+    case Avcs.Agent.HarnessRuntime.active_turn(project, thread_id) do
       {:ok, active} ->
         steer_active_turn(
-          codex_client,
           project,
           thread_id,
           active.turn_id,
@@ -19,7 +16,10 @@ defmodule Avcs.Agent.Runner do
         )
 
       :none ->
-        create_and_start_turn(project, thread_id, text, asset_ids, turn_settings, codex_client)
+        create_and_start_turn(project, thread_id, text, asset_ids, turn_settings)
+
+      {:error, _reason} ->
+        create_and_start_turn(project, thread_id, text, asset_ids, turn_settings)
     end
   end
 
@@ -30,15 +30,13 @@ defmodule Avcs.Agent.Runner do
   end
 
   def rerun_from_item(project, item_id, content, turn_settings \\ %{}) do
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
-    status = if pool_managed_client?(codex_client), do: "queued", else: "in_progress"
+    status = Avcs.Agent.HarnessRuntime.initial_turn_status()
 
     with {:ok, edited} <-
            Avcs.Turns.edit_and_invalidate_after(project, item_id, content, status: status),
          rerun_settings <- Map.merge(edited["turn_settings"] || %{}, turn_settings || %{}),
          :ok <-
-           prepare_codex_thread_for_rerun(
-             codex_client,
+           prepare_harness_thread_for_rerun(
              project,
              edited["turn"]["thread_id"],
              edited["turn"]["id"],
@@ -88,23 +86,15 @@ defmodule Avcs.Agent.Runner do
   end
 
   def stop(project, thread_id, turn_id) do
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
-
-    cond do
-      module_exports?(codex_client, :interrupt_turn, 3) ->
-        codex_client.interrupt_turn(project, thread_id, turn_id)
-
-      true ->
-        {:error, :interrupt_unsupported}
-    end
+    Avcs.Agent.HarnessRuntime.interrupt_turn(project, thread_id, turn_id)
   end
 
   def repair_thread(project, thread_id) do
     with {:ok, thread} <- Avcs.Threads.get_thread(project, thread_id),
-         {:ok, %{"codex_thread_id" => codex_thread_id} = thread}
-         when is_binary(codex_thread_id) and codex_thread_id != "" <-
+         {:ok, %{"remote_thread_id" => remote_thread_id} = thread}
+         when is_binary(remote_thread_id) and remote_thread_id != "" <-
            repairable_thread(project, thread),
-         {:ok, codex_thread} <- read_codex_thread(project, thread_id, codex_thread_id),
+         {:ok, codex_thread} <- read_codex_thread(project, thread_id, remote_thread_id),
          {:ok, repair} <- reconcile_codex_thread(project, thread, codex_thread) do
       broadcast_lists(project, thread_id)
       {:ok, repair}
@@ -117,16 +107,7 @@ defmodule Avcs.Agent.Runner do
     end
   end
 
-  defp active_codex_turn(codex_client, project, thread_id) do
-    if module_exports?(codex_client, :active_turn, 2) do
-      codex_client.active_turn(project, thread_id)
-    else
-      :none
-    end
-  end
-
   defp steer_active_turn(
-         codex_client,
          project,
          thread_id,
          turn_id,
@@ -134,19 +115,18 @@ defmodule Avcs.Agent.Runner do
          asset_ids,
          turn_settings
        ) do
-    with {:ok, item} <-
-           append_steered_user_item(project, thread_id, turn_id, text, asset_ids, turn_settings),
-         {:ok, reference_paths} <-
+    with {:ok, reference_paths} <-
            resolve_reference_paths(project, asset_ids, thread_id, turn_id),
          :ok <-
-           steer_codex_turn(
-             codex_client,
+           steer_harness_turn(
              project,
              thread_id,
              text,
              reference_paths,
              turn_settings
            ),
+         {:ok, item} <-
+           append_steered_user_item(project, thread_id, turn_id, text, asset_ids, turn_settings),
          {:ok, turn} <- Avcs.Turns.get_turn(project, turn_id) do
       Avcs.Events.broadcast("item:created", %{
         thread_id: thread_id,
@@ -179,20 +159,16 @@ defmodule Avcs.Agent.Runner do
     )
   end
 
-  defp steer_codex_turn(codex_client, project, thread_id, text, reference_paths, turn_settings) do
-    if module_exports?(codex_client, :steer_turn, 5) do
-      case codex_client.steer_turn(
-             project,
-             thread_id,
-             agent_text_for(project, text, turn_settings),
-             reference_paths,
-             []
-           ) do
-        {:ok, _response} -> :ok
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      {:error, :steer_unsupported}
+  defp steer_harness_turn(project, thread_id, text, reference_paths, turn_settings) do
+    case Avcs.Agent.HarnessRuntime.steer_turn(
+           project,
+           thread_id,
+           agent_text_for(project, text, turn_settings),
+           reference_paths,
+           []
+         ) do
+      {:ok, _response} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -228,9 +204,10 @@ defmodule Avcs.Agent.Runner do
         Mask edit reference instructions:
         - The first referenced image is the base image to edit.
         - The second referenced image is a mask image.
-        - In the mask image, white or marked areas indicate the region to change.
-        - Black or unmarked areas indicate regions that should remain as close to the base image as possible.
-        - Use the mask as a visual reference. This is not a formal API mask, so preserve unchanged areas as carefully as the available image tool allows.
+        - In the mask image, marked or transparent-alpha areas indicate the region to change.
+        - Unmarked or opaque areas indicate regions that should remain as close to the base image as possible.
+        - If the current image_gen tool schema supports `mask_asset_id`, call image_gen with the base image id in `reference_asset_ids` and the mask image id in `mask_asset_id`.
+        - Otherwise, use the mask as a visual reference and preserve unchanged areas as carefully as the available image tool allows.
         """
         |> String.trim()
     end
@@ -263,8 +240,7 @@ defmodule Avcs.Agent.Runner do
 
   defp data_provider(_turn_settings), do: nil
 
-  defp prepare_codex_thread_for_rerun(
-         _codex_client,
+  defp prepare_harness_thread_for_rerun(
          _project,
          _thread_id,
          _turn_id,
@@ -275,8 +251,7 @@ defmodule Avcs.Agent.Runner do
     :ok
   end
 
-  defp prepare_codex_thread_for_rerun(
-         codex_client,
+  defp prepare_harness_thread_for_rerun(
          project,
          thread_id,
          turn_id,
@@ -285,29 +260,35 @@ defmodule Avcs.Agent.Runner do
        ) do
     trace_opts = codex_thread_trace_opts(project, thread_id, turn_id, settings)
 
-    with {:ok, %{"codex_thread_id" => codex_thread_id}}
-         when is_binary(codex_thread_id) and
-                codex_thread_id != "" <-
+    with {:ok, %{"remote_thread_id" => remote_thread_id}}
+         when is_binary(remote_thread_id) and
+                remote_thread_id != "" <-
            Avcs.Threads.get_thread(project, thread_id),
-         true <- module_exports?(codex_client, :fork_thread, 2),
-         true <- module_exports?(codex_client, :rollback_thread, 3),
-         {:ok, forked_thread} <- codex_client.fork_thread(codex_thread_id, trace_opts),
-         forked_thread_id when is_binary(forked_thread_id) and forked_thread_id != "" <-
-           forked_thread["id"],
-         {:ok, rolled_back_thread} <-
-           codex_client.rollback_thread(forked_thread_id, rollback_count, trace_opts),
-         rolled_back_thread_id
+         {:ok, %{remote_thread_id: rolled_back_thread_id}}
          when is_binary(rolled_back_thread_id) and rolled_back_thread_id != "" <-
-           rolled_back_thread["id"] || forked_thread_id,
+           Avcs.Agent.HarnessRuntime.prepare_rerun(
+             project,
+             thread_id,
+             turn_id,
+             remote_thread_id,
+             rollback_count,
+             trace_opts
+           ),
          :ok <-
-           persist_codex_thread_id(project, thread_id, rolled_back_thread_id, :edit_rerun) do
+           persist_remote_thread_id(
+             project,
+             thread_id,
+             rolled_back_thread_id,
+             :edit_rerun,
+             Avcs.Agent.HarnessRuntime.harness_name()
+           ) do
       :ok
     else
       {:ok, _thread_without_codex_id} ->
         :ok
 
-      false ->
-        fallback_to_new_codex_thread(project, thread_id, :unsupported)
+      :ok ->
+        :ok
 
       {:error, reason} ->
         fallback_to_new_codex_thread(project, thread_id, reason)
@@ -339,15 +320,19 @@ defmodule Avcs.Agent.Runner do
       payload: %{reason: inspect(reason)}
     })
 
-    case Avcs.Threads.set_codex_thread_id(project, thread_id, nil) do
+    case Avcs.Threads.set_remote_thread_id(project, thread_id, nil) do
       {:ok, :ok} -> :ok
       {:error, error} -> {:error, error}
     end
   end
 
-  defp create_and_start_turn(project, thread_id, text, asset_ids, turn_settings, codex_client) do
-    status = if pool_managed_client?(codex_client), do: "queued", else: "in_progress"
-    turn_settings = Map.put(turn_settings, :status, status)
+  defp create_and_start_turn(project, thread_id, text, asset_ids, turn_settings) do
+    status = Avcs.Agent.HarnessRuntime.initial_turn_status()
+
+    turn_settings =
+      turn_settings
+      |> Map.put(:status, status)
+      |> Map.put(:agent_harness, Avcs.Agent.HarnessRuntime.harness_name())
 
     with {:ok, created} <-
            Avcs.Turns.create_user_turn(project, thread_id, text, asset_ids, turn_settings),
@@ -383,30 +368,34 @@ defmodule Avcs.Agent.Runner do
     {:ok, _registry} = Registry.register(Avcs.Agent.RunnerRegistry, {thread_id, turn_id}, nil)
     before_hashes = output_hashes(project)
     {:ok, thread} = Avcs.Threads.get_thread(project, thread_id)
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
 
     with {:ok, reference_paths} <- resolve_reference_paths(project, asset_ids, thread_id, turn_id) do
-      unless pool_managed_client?(codex_client) do
+      unless Avcs.Agent.HarnessRuntime.pool_managed?() do
         Avcs.Events.broadcast("agent:run_started", %{thread_id: thread_id, turn_id: turn_id})
       end
 
       on_event = fn event -> forward_agent_event(project, thread_id, turn_id, event) end
 
-      case run_codex_turn(
-             codex_client,
+      case Avcs.Agent.HarnessRuntime.run_turn(
              project,
-             thread["codex_thread_id"],
+             thread_id,
+             turn_id,
+             thread["remote_thread_id"],
              agent_text_for(project, text, turn_settings),
              reference_paths,
              on_event,
              Map.merge(turn_settings, %{avcs_thread_id: thread_id, avcs_turn_id: turn_id})
            ) do
         {:ok, result} ->
-          case persist_codex_thread_id(
+          agent_harness =
+            Map.get(result, :agent_harness) || Avcs.Agent.HarnessRuntime.harness_name()
+
+          case persist_remote_thread_id(
                  project,
                  thread_id,
-                 result.codex_thread_id,
-                 :run_completed
+                 result.remote_thread_id,
+                 :run_completed,
+                 agent_harness
                ) do
             :ok ->
               sync_thread_title(project, thread_id, Map.get(result, :thread_name))
@@ -427,8 +416,8 @@ defmodule Avcs.Agent.Runner do
                     content: result.assistant_text,
                     payload:
                       %{
-                        codex_items:
-                          result.items |> Enum.take(50) |> Enum.map(&persistable_codex_item/1)
+                        remote_items:
+                          result.items |> Enum.take(50) |> Enum.map(&persistable_remote_item/1)
                       }
                       |> maybe_put_provider_context(provider_context)
                   )
@@ -440,13 +429,17 @@ defmodule Avcs.Agent.Runner do
                 })
               end
 
-              Avcs.Turns.complete_turn(project, turn_id, result.codex_turn_id)
+              Avcs.Turns.complete_turn(project, turn_id, result.remote_turn_id,
+                agent_harness: agent_harness,
+                remote_model: Map.get(result, :remote_model)
+              )
 
               register_image_outputs(
                 project,
                 thread_id,
                 turn_id,
                 result.items,
+                Map.get(result, :output_paths, []),
                 before_hashes,
                 text,
                 provider_context
@@ -557,9 +550,14 @@ defmodule Avcs.Agent.Runner do
 
   defp thinking_event_name({:assistant_delta, _delta, _raw}), do: "item/agentMessage/delta"
   defp thinking_event_name({:item_started, _item, _raw}), do: "item/started"
+  defp thinking_event_name({:item_updated, _item, _raw}), do: "item/updated"
   defp thinking_event_name({:item_completed, _item, _raw}), do: "item/completed"
   defp thinking_event_name({:turn_started, _turn, _raw}), do: "turn/started"
   defp thinking_event_name({:turn_completed, _turn, _raw}), do: "turn/completed"
+
+  defp thinking_event_name({:avcs_agent_state_snapshot, _snapshot, _raw}),
+    do: "agent/state_snapshot"
+
   defp thinking_event_name({:thread_loaded, _thread_id, _raw}), do: "thread/loaded"
   defp thinking_event_name({:thread_name_updated, _params, _raw}), do: "thread/name/updated"
 
@@ -583,6 +581,10 @@ defmodule Avcs.Agent.Runner do
   defp thinking_event_status({:pool_queued, _meta}), do: "queued"
   defp thinking_event_status({:approval_review_started, _params, _raw}), do: "waiting_approval"
   defp thinking_event_status({:error, _error, _raw}), do: "error"
+  defp thinking_event_status({:item_updated, _item, _raw}), do: "updated"
+
+  defp thinking_event_status({:avcs_agent_state_snapshot, snapshot, _raw}),
+    do: to_string(snapshot[:phase] || "snapshot")
 
   defp thinking_event_status({:turn_completed, turn, _raw}) do
     turn["status"] || "completed"
@@ -618,18 +620,19 @@ defmodule Avcs.Agent.Runner do
 
   defp forward_event(project, thread_id, turn_id, {:item_started, item, raw}) do
     if tool_item?(item) do
-      ensure_codex_thread_id(project, thread_id, codex_thread_id_from_raw(raw), :item_started)
+      ensure_remote_thread_id(project, thread_id, remote_thread_id_from_raw(raw), :item_started)
 
       {:ok, avcs_item} =
-        Avcs.Turns.upsert_codex_item(project,
+        Avcs.Turns.upsert_remote_item(project,
           turn_id: turn_id,
           thread_id: thread_id,
-          codex_item_id: item["id"],
+          remote_item_id: item["id"],
+          tool_name: tool_name(item),
           type: "tool_call",
           role: "tool",
           content: tool_summary(item),
           status: "running",
-          payload: %{codex_item: persistable_codex_item(item), tool_name: tool_name(item)}
+          payload: %{remote_item: persistable_remote_item(item), tool_name: tool_name(item)}
         )
 
       trace_event(project, %{
@@ -638,8 +641,8 @@ defmodule Avcs.Agent.Runner do
         thread_id: thread_id,
         turn_id: turn_id,
         item_id: avcs_item["id"],
-        codex_thread_id: codex_thread_id_from_raw(raw),
-        codex_item_id: item["id"],
+        remote_thread_id: remote_thread_id_from_raw(raw),
+        remote_item_id: item["id"],
         status: "running",
         payload: %{item: item},
         raw: raw
@@ -655,18 +658,18 @@ defmodule Avcs.Agent.Runner do
         thread_id: thread_id,
         turn_id: turn_id,
         item: avcs_item,
-        status: "running"
+        status: "started"
       })
     end
   end
 
-  defp forward_event(project, thread_id, _turn_id, {:thread_loaded, codex_thread_id, _raw}) do
-    ensure_codex_thread_id(project, thread_id, codex_thread_id, :thread_loaded)
+  defp forward_event(project, thread_id, _turn_id, {:thread_loaded, remote_thread_id, _raw}) do
+    ensure_remote_thread_id(project, thread_id, remote_thread_id, :thread_loaded)
     :ok
   end
 
   defp forward_event(project, thread_id, turn_id, {:turn_started, turn, raw}) do
-    ensure_codex_thread_id(project, thread_id, codex_thread_id_from_raw(raw), :turn_started)
+    ensure_remote_thread_id(project, thread_id, remote_thread_id_from_raw(raw), :turn_started)
 
     if is_binary(turn["id"]) and turn["id"] != "" do
       {:ok, _turn} = Avcs.Turns.update_turn_status(project, turn_id, "in_progress", turn["id"])
@@ -677,30 +680,78 @@ defmodule Avcs.Agent.Runner do
       event_name: "turn_started",
       thread_id: thread_id,
       turn_id: turn_id,
-      codex_thread_id: codex_thread_id_from_raw(raw),
-      codex_turn_id: turn["id"],
+      remote_thread_id: remote_thread_id_from_raw(raw),
+      remote_turn_id: turn["id"],
       status: turn["status"] || "in_progress",
       payload: %{turn: turn},
       raw: raw
     })
   end
 
+  defp forward_event(project, thread_id, turn_id, {:item_updated, item, raw}) do
+    if tool_item?(item) do
+      ensure_remote_thread_id(project, thread_id, remote_thread_id_from_raw(raw), :item_updated)
+
+      {:ok, avcs_item} =
+        Avcs.Turns.upsert_remote_item(project,
+          turn_id: turn_id,
+          thread_id: thread_id,
+          remote_item_id: item["id"],
+          tool_name: tool_name(item),
+          type: "tool_call",
+          role: "tool",
+          content: tool_summary(item),
+          status: "running",
+          payload: %{remote_item: persistable_remote_item(item), tool_name: tool_name(item)}
+        )
+
+      trace_event(project, %{
+        scope: "item",
+        event_name: "item_updated",
+        thread_id: thread_id,
+        turn_id: turn_id,
+        item_id: avcs_item["id"],
+        remote_thread_id: remote_thread_id_from_raw(raw),
+        remote_item_id: item["id"],
+        status: "updated",
+        payload: %{item: item},
+        raw: raw
+      })
+
+      Avcs.Events.broadcast("item:updated", %{
+        thread_id: thread_id,
+        turn_id: turn_id,
+        item: avcs_item
+      })
+
+      Avcs.Events.broadcast("tool:updated", %{
+        thread_id: thread_id,
+        turn_id: turn_id,
+        item: avcs_item,
+        status: "updated",
+        progress: item["progress"],
+        progress_status: item["progress_status"]
+      })
+    end
+  end
+
   defp forward_event(project, thread_id, turn_id, {:item_completed, item, raw}) do
     if tool_item?(item) do
-      ensure_codex_thread_id(project, thread_id, codex_thread_id_from_raw(raw), :item_completed)
+      ensure_remote_thread_id(project, thread_id, remote_thread_id_from_raw(raw), :item_completed)
 
       status = tool_status(item)
 
       {:ok, avcs_item} =
-        Avcs.Turns.upsert_codex_item(project,
+        Avcs.Turns.upsert_remote_item(project,
           turn_id: turn_id,
           thread_id: thread_id,
-          codex_item_id: item["id"],
+          remote_item_id: item["id"],
+          tool_name: tool_name(item),
           type: "tool_result",
           role: "tool",
           content: tool_summary(item),
           status: status,
-          payload: %{codex_item: persistable_codex_item(item), tool_name: tool_name(item)}
+          payload: %{remote_item: persistable_remote_item(item), tool_name: tool_name(item)}
         )
 
       trace_event(project, %{
@@ -709,8 +760,8 @@ defmodule Avcs.Agent.Runner do
         thread_id: thread_id,
         turn_id: turn_id,
         item_id: avcs_item["id"],
-        codex_thread_id: codex_thread_id_from_raw(raw),
-        codex_item_id: item["id"],
+        remote_thread_id: remote_thread_id_from_raw(raw),
+        remote_item_id: item["id"],
         status: status,
         payload: %{item: item},
         raw: raw
@@ -726,7 +777,7 @@ defmodule Avcs.Agent.Runner do
         thread_id: thread_id,
         turn_id: turn_id,
         item: avcs_item,
-        status: status
+        status: tool_lifecycle_status(status)
       })
 
       persist_image_generation_output_on_item_completed(
@@ -740,10 +791,10 @@ defmodule Avcs.Agent.Runner do
   end
 
   defp forward_event(project, thread_id, turn_id, {:approval_review_started, params, raw}) do
-    ensure_codex_thread_id(project, thread_id, params["threadId"], :approval_review_started)
+    ensure_remote_thread_id(project, thread_id, params["threadId"], :approval_review_started)
 
     {:ok, avcs_item} =
-      Avcs.Turns.upsert_codex_item(
+      Avcs.Turns.upsert_remote_item(
         project,
         Avcs.Agent.ApprovalReview.started_item_attrs(thread_id, turn_id, params, raw)
       )
@@ -756,9 +807,9 @@ defmodule Avcs.Agent.Runner do
       thread_id: thread_id,
       turn_id: turn_id,
       item_id: avcs_item["id"],
-      codex_thread_id: params["threadId"],
-      codex_turn_id: params["turnId"],
-      codex_item_id: avcs_item["codex_item_id"],
+      remote_thread_id: params["threadId"],
+      remote_turn_id: params["turnId"],
+      remote_item_id: avcs_item["remote_item_id"],
       status: avcs_item["status"],
       payload: params,
       raw: raw
@@ -770,10 +821,10 @@ defmodule Avcs.Agent.Runner do
   end
 
   defp forward_event(project, thread_id, turn_id, {:approval_review_completed, params, raw}) do
-    ensure_codex_thread_id(project, thread_id, params["threadId"], :approval_review_completed)
+    ensure_remote_thread_id(project, thread_id, params["threadId"], :approval_review_completed)
 
     {:ok, avcs_item} =
-      Avcs.Turns.upsert_codex_item(
+      Avcs.Turns.upsert_remote_item(
         project,
         Avcs.Agent.ApprovalReview.completed_item_attrs(thread_id, turn_id, params, raw)
       )
@@ -788,9 +839,9 @@ defmodule Avcs.Agent.Runner do
       thread_id: thread_id,
       turn_id: turn_id,
       item_id: avcs_item["id"],
-      codex_thread_id: params["threadId"],
-      codex_turn_id: params["turnId"],
-      codex_item_id: avcs_item["codex_item_id"],
+      remote_thread_id: params["threadId"],
+      remote_turn_id: params["turnId"],
+      remote_item_id: avcs_item["remote_item_id"],
       status: avcs_item["status"],
       payload: params,
       raw: raw
@@ -814,11 +865,29 @@ defmodule Avcs.Agent.Runner do
       event_name: "turn_completed",
       thread_id: thread_id,
       turn_id: turn_id,
-      codex_thread_id: codex_thread_id_from_raw(raw),
-      codex_turn_id: turn["id"],
+      remote_thread_id: remote_thread_id_from_raw(raw),
+      remote_turn_id: turn["id"],
       status: turn["status"],
       payload: %{turn: turn},
       raw: raw
+    })
+  end
+
+  defp forward_event(project, thread_id, turn_id, {:avcs_agent_state_snapshot, snapshot, raw}) do
+    trace_event(project, %{
+      scope: "agent",
+      event_name: "state_snapshot",
+      thread_id: thread_id,
+      turn_id: turn_id,
+      status: to_string(snapshot[:phase] || "snapshot"),
+      payload: snapshot,
+      raw: raw
+    })
+
+    Avcs.Events.broadcast("agent:state_snapshot", %{
+      thread_id: thread_id,
+      turn_id: turn_id,
+      snapshot: snapshot
     })
   end
 
@@ -879,18 +948,24 @@ defmodule Avcs.Agent.Runner do
     })
   end
 
-  defp ensure_codex_thread_id(project, thread_id, codex_thread_id, context)
-       when is_binary(codex_thread_id) and codex_thread_id != "" do
+  defp ensure_remote_thread_id(project, thread_id, remote_thread_id, context)
+       when is_binary(remote_thread_id) and remote_thread_id != "" do
     case Avcs.Threads.get_thread(project, thread_id) do
-      {:ok, %{"codex_thread_id" => existing}} when existing in [nil, ""] ->
-        persist_codex_thread_id(project, thread_id, codex_thread_id, context)
+      {:ok, %{"remote_thread_id" => existing}} when existing in [nil, ""] ->
+        persist_remote_thread_id(
+          project,
+          thread_id,
+          remote_thread_id,
+          context,
+          Avcs.Agent.HarnessRuntime.harness_name()
+        )
 
-      {:ok, %{"codex_thread_id" => ^codex_thread_id}} ->
+      {:ok, %{"remote_thread_id" => ^remote_thread_id}} ->
         :ok
 
-      {:ok, %{"codex_thread_id" => existing}} ->
+      {:ok, %{"remote_thread_id" => existing}} ->
         Logger.warning(
-          "Ignoring mismatched Codex thread id #{inspect(codex_thread_id)} for local thread #{thread_id} during #{context}; existing id is #{inspect(existing)}"
+          "Ignoring mismatched remote thread id #{inspect(remote_thread_id)} for local thread #{thread_id} during #{context}; existing id is #{inspect(existing)}"
         )
 
         :ok
@@ -898,7 +973,7 @@ defmodule Avcs.Agent.Runner do
       {:ok, nil} ->
         report_codex_thread_persist_failure(
           thread_id,
-          codex_thread_id,
+          remote_thread_id,
           context,
           :thread_not_found
         )
@@ -906,40 +981,58 @@ defmodule Avcs.Agent.Runner do
         {:error, :thread_not_found}
 
       {:error, reason} ->
-        report_codex_thread_persist_failure(thread_id, codex_thread_id, context, reason)
+        report_codex_thread_persist_failure(thread_id, remote_thread_id, context, reason)
         {:error, reason}
     end
   end
 
-  defp ensure_codex_thread_id(_project, _thread_id, _codex_thread_id, _context), do: :ok
+  defp ensure_remote_thread_id(_project, _thread_id, _remote_thread_id, _context), do: :ok
 
-  defp persist_codex_thread_id(project, thread_id, codex_thread_id, context)
-       when is_binary(codex_thread_id) and codex_thread_id != "" do
-    case Avcs.Threads.set_codex_thread_id(project, thread_id, codex_thread_id) do
+  defp persist_remote_thread_id(
+         project,
+         thread_id,
+         remote_thread_id,
+         context,
+         agent_harness \\ nil
+       )
+
+  defp persist_remote_thread_id(
+         project,
+         thread_id,
+         remote_thread_id,
+         context,
+         agent_harness
+       )
+       when is_binary(remote_thread_id) and remote_thread_id != "" do
+    case Avcs.Threads.set_remote_thread_id(project, thread_id, remote_thread_id,
+           agent_harness: agent_harness
+         ) do
       {:ok, :ok} ->
         :ok
 
       {:error, reason} ->
-        report_codex_thread_persist_failure(thread_id, codex_thread_id, context, reason)
+        report_codex_thread_persist_failure(thread_id, remote_thread_id, context, reason)
         {:error, reason}
     end
   end
 
-  defp persist_codex_thread_id(_project, thread_id, codex_thread_id, context) do
-    reason = "missing Codex thread id during #{context}: #{inspect(codex_thread_id)}"
-    report_codex_thread_persist_failure(thread_id, codex_thread_id, context, reason)
+  defp persist_remote_thread_id(_project, thread_id, remote_thread_id, context, _agent_harness) do
+    reason = "missing remote thread id during #{context}: #{inspect(remote_thread_id)}"
+    report_codex_thread_persist_failure(thread_id, remote_thread_id, context, reason)
     {:error, reason}
   end
 
-  defp report_codex_thread_persist_failure(thread_id, codex_thread_id, context, reason) do
+  defp report_codex_thread_persist_failure(thread_id, remote_thread_id, context, reason) do
     message =
-      "Failed to persist Codex thread id #{inspect(codex_thread_id)} for local thread #{thread_id} during #{context}: #{inspect(reason)}"
+      "Failed to persist remote thread id #{inspect(remote_thread_id)} for local thread #{thread_id} during #{context}: #{inspect(reason)}"
 
     Logger.warning(message)
     Avcs.Events.broadcast("error", %{thread_id: thread_id, message: message, scope: "agent"})
   end
 
   defp trace_event(project, attrs) do
+    attrs = Map.put_new(attrs, :agent_harness, Avcs.Agent.HarnessRuntime.harness_name())
+
     case Avcs.Trace.append_event(project, attrs) do
       {:ok, _event} ->
         :ok
@@ -954,21 +1047,21 @@ defmodule Avcs.Agent.Runner do
   end
 
   defp persist_failure_message(reason) do
-    "Failed to persist Codex thread id before completing turn: #{inspect(reason)}"
+    "Failed to persist remote thread id before completing turn: #{inspect(reason)}"
   end
 
-  defp codex_thread_id_from_raw(%{"params" => %{"threadId" => thread_id}})
+  defp remote_thread_id_from_raw(%{"params" => %{"threadId" => thread_id}})
        when is_binary(thread_id),
        do: thread_id
 
-  defp codex_thread_id_from_raw(%{"threadId" => thread_id}) when is_binary(thread_id),
+  defp remote_thread_id_from_raw(%{"threadId" => thread_id}) when is_binary(thread_id),
     do: thread_id
 
-  defp codex_thread_id_from_raw(%{"result" => %{"thread" => %{"id" => thread_id}}})
+  defp remote_thread_id_from_raw(%{"result" => %{"thread" => %{"id" => thread_id}}})
        when is_binary(thread_id),
        do: thread_id
 
-  defp codex_thread_id_from_raw(_raw), do: nil
+  defp remote_thread_id_from_raw(_raw), do: nil
 
   defp approval_payload(thread_id, turn_id, item) do
     %{
@@ -981,12 +1074,10 @@ defmodule Avcs.Agent.Runner do
   end
 
   defp forward_codex_approval(thread_id, turn_id, payload) do
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
-
-    if module_exports?(codex_client, :respond_approval, 3) do
-      codex_client.respond_approval(thread_id, turn_id, payload)
-    else
-      :ok
+    case Avcs.Agent.HarnessRuntime.respond_approval(thread_id, turn_id, payload) do
+      :ok -> :ok
+      {:error, :approval_response_unsupported} -> :ok
+      {:error, _reason} -> :ok
     end
   end
 
@@ -994,14 +1085,16 @@ defmodule Avcs.Agent.Runner do
          project,
          thread_id,
          turn_id,
-         codex_items,
+         remote_items,
+         output_paths,
          before_hashes,
          prompt,
          provider_context
        ) do
     paths =
-      codex_items
+      remote_items
       |> image_paths_from_items()
+      |> Kernel.++(List.wrap(output_paths))
       |> Kernel.++(new_output_paths(project, before_hashes))
       |> Enum.map(&Path.expand/1)
       |> Enum.uniq()
@@ -1219,45 +1312,46 @@ defmodule Avcs.Agent.Runner do
 
   defp repairable_thread(_project, nil), do: {:ok, nil}
 
-  defp repairable_thread(_project, %{"codex_thread_id" => codex_thread_id} = thread)
-       when is_binary(codex_thread_id) and codex_thread_id != "" do
+  defp repairable_thread(_project, %{"remote_thread_id" => remote_thread_id} = thread)
+       when is_binary(remote_thread_id) and remote_thread_id != "" do
     {:ok, thread}
   end
 
   defp repairable_thread(project, thread) do
-    with {:ok, codex_thread_id} <- recover_codex_thread_id(project, thread),
-         :ok <- persist_codex_thread_id(project, thread["id"], codex_thread_id, :repair_recovered) do
-      {:ok, %{thread | "codex_thread_id" => codex_thread_id}}
+    with {:ok, remote_thread_id} <- recover_remote_thread_id(project, thread),
+         :ok <-
+           persist_remote_thread_id(project, thread["id"], remote_thread_id, :repair_recovered) do
+      {:ok, %{thread | "remote_thread_id" => remote_thread_id}}
     else
-      {:error, :not_found} -> {:error, :codex_thread_id_missing}
+      {:error, :not_found} -> {:error, :remote_thread_id_missing}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp recover_codex_thread_id(project, thread) do
-    with {:ok, codex_item_ids} <- repair_codex_item_ids(project, thread["id"]),
-         [_first | _rest] <- codex_item_ids,
-         {:ok, codex_thread_id} <- find_codex_session_thread_id(project, codex_item_ids) do
-      {:ok, codex_thread_id}
+  defp recover_remote_thread_id(project, thread) do
+    with {:ok, remote_item_ids} <- repair_remote_item_ids(project, thread["id"]),
+         [_first | _rest] <- remote_item_ids,
+         {:ok, remote_thread_id} <- find_codex_session_thread_id(project, remote_item_ids) do
+      {:ok, remote_thread_id}
     else
       [] -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp repair_codex_item_ids(project, thread_id) do
+  defp repair_remote_item_ids(project, thread_id) do
     with {:ok, items} <- Avcs.Turns.list_items(project, thread_id) do
-      codex_item_ids =
+      remote_item_ids =
         items
-        |> Enum.map(& &1["codex_item_id"])
+        |> Enum.map(& &1["remote_item_id"])
         |> Enum.filter(&(is_binary(&1) and &1 != ""))
         |> Enum.uniq()
 
-      {:ok, codex_item_ids}
+      {:ok, remote_item_ids}
     end
   end
 
-  defp find_codex_session_thread_id(project, codex_item_ids) do
+  defp find_codex_session_thread_id(project, remote_item_ids) do
     project_path = project |> Avcs.Projects.folder_path() |> Path.expand()
 
     codex_session_files()
@@ -1265,7 +1359,7 @@ defmodule Avcs.Agent.Runner do
       with %{"id" => session_id, "cwd" => cwd} when is_binary(session_id) and is_binary(cwd) <-
              codex_session_meta(path),
            true <- Path.expand(cwd) == project_path,
-           true <- file_contains_any?(path, codex_item_ids) do
+           true <- file_contains_any?(path, remote_item_ids) do
         session_id
       else
         _ -> nil
@@ -1319,18 +1413,12 @@ defmodule Avcs.Agent.Runner do
     _error -> false
   end
 
-  defp read_codex_thread(project, thread_id, codex_thread_id) do
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
-
-    if module_exports?(codex_client, :read_thread, 2) do
-      codex_client.read_thread(codex_thread_id,
-        include_turns: true,
-        project: project,
-        avcs_thread_id: thread_id
-      )
-    else
-      {:error, :thread_read_unsupported}
-    end
+  defp read_codex_thread(project, thread_id, remote_thread_id) do
+    Avcs.Agent.HarnessRuntime.read_thread(remote_thread_id,
+      include_turns: true,
+      project: project,
+      avcs_thread_id: thread_id
+    )
   end
 
   defp reconcile_codex_thread(project, local_thread, codex_thread) do
@@ -1350,7 +1438,7 @@ defmodule Avcs.Agent.Runner do
 
     {:ok,
      %{
-       codex_thread_id: codex_thread["id"],
+       remote_thread_id: codex_thread["id"],
        codex_turns: length(codex_turns),
        matched_turns: matched_turns,
        synced_items: stats.synced_items,
@@ -1373,13 +1461,13 @@ defmodule Avcs.Agent.Runner do
 
           local_turn ->
             before_assets = asset_count(project)
-            codex_items = codex_turn["items"] || []
-            sync_codex_turn(project, local_thread["id"], local_turn, codex_turn, codex_items)
+            remote_items = codex_turn["items"] || []
+            sync_codex_turn(project, local_thread["id"], local_turn, codex_turn, remote_items)
             after_assets = asset_count(project)
 
             {matched_count + 1,
              %{
-               synced_items: stats.synced_items + length(codex_items),
+               synced_items: stats.synced_items + length(remote_items),
                imported_images: stats.imported_images + max(after_assets - before_assets, 0)
              }, MapSet.put(used_turn_ids, local_turn["id"])}
         end
@@ -1388,50 +1476,51 @@ defmodule Avcs.Agent.Runner do
     {matched_count, stats}
   end
 
-  defp sync_codex_turn(project, thread_id, local_turn, codex_turn, codex_items) do
-    codex_turn_id = codex_turn["id"]
+  defp sync_codex_turn(project, thread_id, local_turn, codex_turn, remote_items) do
+    remote_turn_id = codex_turn["id"]
 
-    if is_binary(codex_turn_id) and codex_turn_id != "" do
+    if is_binary(remote_turn_id) and remote_turn_id != "" do
       {:ok, _turn} =
         Avcs.Turns.update_turn_status(
           project,
           local_turn["id"],
           local_turn_status(codex_turn),
-          codex_turn_id,
+          remote_turn_id,
           turn_error_message(codex_turn)
         )
     end
 
-    codex_items
+    remote_items
     |> Enum.reject(&(&1["type"] == "userMessage"))
-    |> Enum.each(&sync_codex_item(project, thread_id, local_turn["id"], &1))
+    |> Enum.each(&sync_remote_item(project, thread_id, local_turn["id"], &1))
 
     register_image_outputs(
       project,
       thread_id,
       local_turn["id"],
-      codex_items,
+      remote_items,
+      [],
       output_hashes(project),
       local_turn["user_text"] || "",
-      Avcs.Agent.DataProvider.provider_context(local_turn["data_provider"], codex_items)
+      Avcs.Agent.DataProvider.provider_context(local_turn["data_provider"], remote_items)
     )
   end
 
-  defp sync_codex_item(project, thread_id, turn_id, %{"type" => "agentMessage"} = item) do
+  defp sync_remote_item(project, thread_id, turn_id, %{"type" => "agentMessage"} = item) do
     text = item["text"] || ""
 
     if String.trim(text) != "" and
          not assistant_message_exists?(project, thread_id, turn_id, item) do
       {:ok, avcs_item} =
-        Avcs.Turns.upsert_codex_item(project,
+        Avcs.Turns.upsert_remote_item(project,
           turn_id: turn_id,
           thread_id: thread_id,
-          codex_item_id: item["id"],
+          remote_item_id: item["id"],
           type: "assistant_message",
           role: "assistant",
           content: text,
           status: "completed",
-          payload: %{codex_item: persistable_codex_item(item), recovered: true}
+          payload: %{remote_item: persistable_remote_item(item), recovered: true}
         )
 
       Avcs.Events.broadcast("item:updated", %{
@@ -1442,21 +1531,21 @@ defmodule Avcs.Agent.Runner do
     end
   end
 
-  defp sync_codex_item(project, thread_id, turn_id, item) do
+  defp sync_remote_item(project, thread_id, turn_id, item) do
     if tool_item?(item) do
       status = tool_status(item)
 
       {:ok, avcs_item} =
-        Avcs.Turns.upsert_codex_item(project,
+        Avcs.Turns.upsert_remote_item(project,
           turn_id: turn_id,
           thread_id: thread_id,
-          codex_item_id: item["id"],
+          remote_item_id: item["id"],
           type: if(status == "running", do: "tool_call", else: "tool_result"),
           role: "tool",
           content: tool_summary(item),
           status: status,
           payload: %{
-            codex_item: persistable_codex_item(item),
+            remote_item: persistable_remote_item(item),
             tool_name: tool_name(item),
             recovered: true
           }
@@ -1475,7 +1564,7 @@ defmodule Avcs.Agent.Runner do
       {:ok, items} ->
         Enum.any?(items, fn local_item ->
           local_item["turn_id"] == turn_id and local_item["type"] == "assistant_message" and
-            (local_item["codex_item_id"] == item["id"] or local_item["content"] == item["text"])
+            (local_item["remote_item_id"] == item["id"] or local_item["content"] == item["text"])
         end)
 
       {:error, _reason} ->
@@ -1483,8 +1572,8 @@ defmodule Avcs.Agent.Runner do
     end
   end
 
-  defp match_local_turn(local_turns, %{"id" => codex_turn_id} = codex_turn) do
-    Enum.find(local_turns, &(&1["codex_turn_id"] == codex_turn_id)) ||
+  defp match_local_turn(local_turns, %{"id" => remote_turn_id} = codex_turn) do
+    Enum.find(local_turns, &(&1["remote_turn_id"] == remote_turn_id)) ||
       match_local_turn_by_user_text(local_turns, codex_turn) ||
       match_single_unlinked_turn(local_turns)
   end
@@ -1499,13 +1588,13 @@ defmodule Avcs.Agent.Runner do
 
     if codex_text do
       Enum.find(local_turns, fn turn ->
-        is_nil(turn["codex_turn_id"]) and normalized_text(turn["user_text"]) == codex_text
+        is_nil(turn["remote_turn_id"]) and normalized_text(turn["user_text"]) == codex_text
       end)
     end
   end
 
   defp match_single_unlinked_turn(local_turns) do
-    case Enum.filter(local_turns, &is_nil(&1["codex_turn_id"])) do
+    case Enum.filter(local_turns, &is_nil(&1["remote_turn_id"])) do
       [turn] -> turn
       _turns -> nil
     end
@@ -1565,48 +1654,6 @@ defmodule Avcs.Agent.Runner do
     end
   end
 
-  defp run_codex_turn(
-         codex_client,
-         project,
-         codex_thread_id,
-         text,
-         reference_paths,
-         on_event,
-         settings
-       ) do
-    cond do
-      module_exports?(codex_client, :run_turn, 8) ->
-        codex_client.run_turn(
-          project,
-          settings[:avcs_thread_id],
-          settings[:avcs_turn_id],
-          codex_thread_id,
-          text,
-          reference_paths,
-          on_event,
-          settings
-        )
-
-      module_exports?(codex_client, :run_turn, 6) ->
-        codex_client.run_turn(project, codex_thread_id, text, reference_paths, on_event, settings)
-
-      true ->
-        codex_client.run_turn(project, codex_thread_id, text, reference_paths, on_event)
-    end
-  end
-
-  defp pool_managed_client?(codex_client) do
-    module_exports?(codex_client, :active_turn, 2) and
-      module_exports?(codex_client, :steer_turn, 5) and
-      module_exports?(codex_client, :run_turn, 8)
-  end
-
-  defp module_exports?(module, function, arity) when is_atom(module) do
-    Code.ensure_loaded?(module) and function_exported?(module, function, arity)
-  end
-
-  defp module_exports?(_module, _function, _arity), do: false
-
   defp tool_item?(%{"type" => type}) do
     type in [
       "commandExecution",
@@ -1644,6 +1691,9 @@ defmodule Avcs.Agent.Runner do
   defp tool_status(%{"error" => error}) when not is_nil(error), do: "failed"
   defp tool_status(_item), do: "completed"
 
+  defp tool_lifecycle_status(status) when status in ["failed", "cancelled"], do: "failed"
+  defp tool_lifecycle_status(_status), do: "completed"
+
   defp tool_summary(%{"type" => "commandExecution"} = item) do
     item["command"] || item["cmd"] || item["text"] || "Command"
   end
@@ -1680,7 +1730,7 @@ defmodule Avcs.Agent.Runner do
 
   defp tool_summary(item), do: tool_name(item)
 
-  defp persistable_codex_item(%{"type" => "imageGeneration", "result" => result} = item)
+  defp persistable_remote_item(%{"type" => "imageGeneration", "result" => result} = item)
        when is_binary(result) and result != "" do
     item
     |> Map.delete("result")
@@ -1688,7 +1738,7 @@ defmodule Avcs.Agent.Runner do
     |> Map.put("result_size_bytes", byte_size(result))
   end
 
-  defp persistable_codex_item(item), do: item
+  defp persistable_remote_item(item), do: item
 
   defp output_hashes(project) do
     Avcs.Projects.output_dir(project)

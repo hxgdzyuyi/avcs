@@ -239,6 +239,61 @@ defmodule Avcs.Agent.CodexAppServerPoolTest do
     Application.put_env(:avcs, :codex_app_server_pool_server, previous_pool_server)
   end
 
+  test "provider settings change removes idle workers and routes" do
+    project = project("project-provider-idle")
+
+    task = async_run(project, "thread-1", "turn-1", nil, "before-key")
+    assert_receive {:worker_started, worker}
+    assert_receive {:run_turn, ^worker, nil, "before-key"}
+    send(worker, {:complete, "codex-thread-provider"})
+    assert {:ok, %{codex_thread_id: "codex-thread-provider"}} = Task.await(task, 1_000)
+
+    assert %{worker_count: 1, provider_settings_generation: 0} =
+             Avcs.Agent.CodexAppServerPool.stats()
+
+    assert :ok = Avcs.Agent.CodexAppServerPool.provider_settings_changed()
+
+    assert %{
+             worker_count: 0,
+             local_routes: %{},
+             codex_routes: %{},
+             provider_settings_generation: 1
+           } =
+             Avcs.Agent.CodexAppServerPool.stats()
+
+    next = async_run(project, "thread-1", "turn-2", "codex-thread-provider", "after-key")
+    assert_receive {:worker_started, next_worker}
+    assert next_worker != worker
+    assert_receive {:run_turn, ^next_worker, "codex-thread-provider", "after-key"}
+    send(next_worker, {:complete, "codex-thread-provider"})
+    assert {:ok, %{codex_thread_id: "codex-thread-provider"}} = Task.await(next, 1_000)
+  end
+
+  test "provider settings change does not stop active workers but prevents reuse" do
+    project = project("project-provider-active")
+
+    task = async_run(project, "thread-1", "turn-1", nil, "active-before-key")
+    assert_receive {:worker_started, worker}
+    assert_receive {:run_turn, ^worker, nil, "active-before-key"}
+
+    monitor_ref = Process.monitor(worker)
+    assert :ok = Avcs.Agent.CodexAppServerPool.provider_settings_changed()
+    refute_receive {:DOWN, ^monitor_ref, :process, ^worker, _reason}, 100
+
+    send(worker, {:complete, "codex-thread-provider-active"})
+    assert {:ok, %{codex_thread_id: "codex-thread-provider-active"}} = Task.await(task, 1_000)
+    wait_until(fn -> Avcs.Agent.CodexAppServerPool.stats().worker_count == 0 end)
+
+    next =
+      async_run(project, "thread-1", "turn-2", "codex-thread-provider-active", "active-after-key")
+
+    assert_receive {:worker_started, next_worker}
+    assert next_worker != worker
+    assert_receive {:run_turn, ^next_worker, "codex-thread-provider-active", "active-after-key"}
+    send(next_worker, {:complete, "codex-thread-provider-active"})
+    assert {:ok, %{codex_thread_id: "codex-thread-provider-active"}} = Task.await(next, 1_000)
+  end
+
   test "active same-thread input steers without starting another worker" do
     project = project("project-steer")
     task = async_run(project, "thread-1", "turn-1", nil, "active")

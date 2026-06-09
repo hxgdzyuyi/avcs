@@ -97,6 +97,10 @@ defmodule Avcs.Agent.CodexClient do
     call_server({:list_models, opts}, timeout + @call_timeout_buffer_ms)
   end
 
+  def available? do
+    match?({:ok, _path}, codex_executable())
+  end
+
   def list_models_on(server, opts \\ []) do
     timeout = Application.get_env(:avcs, :codex_model_list_timeout_ms, @model_list_timeout_ms)
     call_server(server, {:list_models, opts}, timeout + @call_timeout_buffer_ms)
@@ -2149,8 +2153,12 @@ defmodule Avcs.Agent.CodexClient do
         {:error, "codex executable was not found in PATH or common install locations"}
 
       path ->
-        {:ok, %{path: path, env: [{"PATH", codex_child_path(path)}]}}
+        {:ok, %{path: path, env: app_server_env(path)}}
     end
+  end
+
+  defp app_server_env(path) do
+    [{"PATH", codex_child_path(path)} | Avcs.Agent.ProviderSettings.app_server_env()]
   end
 
   defp configured_codex_executable do
@@ -2347,7 +2355,7 @@ defmodule Avcs.Agent.CodexClient do
         Follow these constraints:
         - Use reasonable defaults for ordinary ambiguity.
         - When Codex requires approval for a restricted action, hand control back through the configured approval flow.
-        - Disable the system imagegen skill. If the user asks to create or edit images, use the project-local avcs-imagegen skill instead: #{fallback_avcs_imagegen_skill_path()}
+        - Disable the system imagegen skill. If the user asks to create or edit images, use the project-local avcs-imagegen-codex skill instead: #{fallback_avcs_imagegen_skill_path()}
         - Use only the built-in image generation tool for image generation and editing.
         - Current project directory: #{Path.expand(Avcs.Projects.folder_path(project))}
         - Save generated or edited images into this project output directory: #{Avcs.Projects.output_dir(project)}
@@ -2418,24 +2426,38 @@ defmodule Avcs.Agent.CodexClient do
   defp render_thread_runtime_instructions(instructions, project, instruction_path) do
     project_path = Path.expand(Avcs.Projects.folder_path(project))
     output_dir = Path.expand(Avcs.Projects.output_dir(project))
+    imagegen_skill_name = "avcs-imagegen-codex"
     imagegen_skill_path = avcs_imagegen_skill_path(instruction_path)
 
     instructions
     |> String.replace("{{project_path}}", project_path)
     |> String.replace("{{project_output_dir}}", output_dir)
+    |> String.replace("{{avcs_imagegen_skill_name}}", imagegen_skill_name)
     |> String.replace("{{avcs_imagegen_skill_path}}", imagegen_skill_path)
+    |> String.replace("{{image_gen_tool_policy}}", codex_image_gen_tool_policy())
+  end
+
+  defp codex_image_gen_tool_policy do
+    """
+    Codex Agent image generation policy:
+    - 当前 thread 中，图片生成与编辑只使用 Codex built-in `image_gen`。
+    - `image_gen` 返回的 `savedPath` 仅是生成源码路径；最终图片资产必须写入当前项目的 `output/`。
+    - 即使用户要求海报、封面、信息图、带文字视觉稿或需要精确排版，也只能把这些要求整理进 Codex built-in `image_gen` 提示词；如果 built-in `image_gen` 无法可靠生成精确文字，直接说明限制，不要改用 HTML 排版或浏览器截图。
+    - 当 Codex built-in `image_gen` 不可用时，直接说明限制；不要切换到 CLI、SDK、OpenAI API、自定义脚本生成器或其它模型调用路径。
+    - 使用 Codex built-in `image_gen` 后优先使用其返回的确定产物路径（如 `ig_*.png`），不要通过 `find`/遍历目录猜测文件位置再拷贝。
+    """
   end
 
   defp avcs_imagegen_skill_path(instruction_path) do
     instruction_path
     |> Path.dirname()
-    |> Path.join("../skills/avcs-imagegen/SKILL.md")
+    |> Path.join("../skills/avcs-imagegen-codex/SKILL.md")
     |> Path.expand()
   end
 
   defp fallback_avcs_imagegen_skill_path do
     case thread_runtime_skill_path() do
-      nil -> Path.expand("priv/skills/avcs-imagegen/SKILL.md", File.cwd!())
+      nil -> Path.expand("priv/skills/avcs-imagegen-codex/SKILL.md", File.cwd!())
       path -> avcs_imagegen_skill_path(path)
     end
   end

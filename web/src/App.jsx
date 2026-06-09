@@ -46,10 +46,17 @@ const BOARD_HISTORY_FIELDS = [
   "z_index",
 ];
 const DEFAULT_SITE_SETTINGS = {
+  "agent.harness": "codex",
   "agent.default_model": "gpt-5.5",
   "agent.default_effort": "medium",
   "agent.default_approval_policy": "never",
   "agent.default_sandbox_mode": "workspace-write",
+  "agent.avcs_agent.base_url": "https://ai-gateway.vercel.sh/v1",
+  "agent.avcs_agent.text_model": "deepseek/deepseek-v4-pro",
+  "agent.avcs_agent.image_model": "openai/gpt-image-2",
+  "agent.avcs_agent.max_tool_steps": 3,
+  "agent.avcs_agent.compact_threshold": 0.75,
+  "providers.vercel_ai_gateway.api_key": null,
   "image.default_ratio": "auto",
   "image.default_count": 1,
   "image.transparent_background": false,
@@ -1830,7 +1837,7 @@ export default function App() {
                 mode: "visual_reference",
                 base_asset_id: assetId,
                 mask_asset_id: maskAsset.id,
-                mask_semantics: "white_edit_black_keep",
+                mask_semantics: "transparent_edit_opaque_keep",
               },
             }
           : {}),
@@ -1973,6 +1980,11 @@ export default function App() {
     const data = await channel.push("site_settings:reset", { keys });
     applySiteSettings(data);
     return data;
+  }
+
+  async function handleTestAvcsAgent() {
+    if (!channel) throw new Error("WebSocket disconnected");
+    return channel.push("avcs_agent:test", {});
   }
 
   function applySiteSettings(data) {
@@ -2656,6 +2668,7 @@ export default function App() {
           t={t}
           onSave={handleSaveSiteSettings}
           onReset={handleResetSiteSettings}
+          onTestAvcsAgent={handleTestAvcsAgent}
           onBack={handleCloseSettings}
           onConfirm={confirmAction}
         />

@@ -9,6 +9,7 @@ defmodule Avcs.Agent.CodexClientTest do
     previous_validation = fetch_env(:codex_schema_validation)
     previous_request_timeout = fetch_env(:codex_request_timeout_ms)
     previous_idle_timeout = fetch_env(:codex_idle_timeout_ms)
+    previous_global_db_path = fetch_env(:global_db_path)
     previous_path = System.get_env("PATH")
     previous_home = System.get_env("HOME")
     previous_codex_executable_env = System.get_env("AVCS_CODEX_EXECUTABLE")
@@ -17,6 +18,7 @@ defmodule Avcs.Agent.CodexClientTest do
     previous_requests = System.get_env("AVCS_FAKE_CODEX_REQUESTS")
     previous_mode = System.get_env("AVCS_FAKE_CODEX_MODE")
     previous_child_path_log = System.get_env("AVCS_FAKE_CODEX_CHILD_PATH_LOG")
+    previous_child_env_log = System.get_env("AVCS_FAKE_CODEX_CHILD_ENV_LOG")
 
     tmp_dir =
       Path.join(System.tmp_dir!(), "avcs-codex-client-#{System.unique_integer([:positive])}")
@@ -31,6 +33,7 @@ defmodule Avcs.Agent.CodexClientTest do
     File.write!(script_path, fake_codex_script())
     File.chmod!(script_path, 0o755)
 
+    Application.put_env(:avcs, :global_db_path, Path.join(tmp_dir, "global.sqlite3"))
     worker = start_supervised!({Avcs.Agent.CodexClient, name: nil})
 
     Application.put_env(:avcs, :codex_client_server, worker)
@@ -48,6 +51,7 @@ defmodule Avcs.Agent.CodexClientTest do
       restore_env(:codex_schema_validation, previous_validation)
       restore_env(:codex_request_timeout_ms, previous_request_timeout)
       restore_env(:codex_idle_timeout_ms, previous_idle_timeout)
+      restore_env(:global_db_path, previous_global_db_path)
       restore_system_env("PATH", previous_path)
       restore_system_env("HOME", previous_home)
       restore_system_env("AVCS_CODEX_EXECUTABLE", previous_codex_executable_env)
@@ -56,6 +60,7 @@ defmodule Avcs.Agent.CodexClientTest do
       restore_system_env("AVCS_FAKE_CODEX_REQUESTS", previous_requests)
       restore_system_env("AVCS_FAKE_CODEX_MODE", previous_mode)
       restore_system_env("AVCS_FAKE_CODEX_CHILD_PATH_LOG", previous_child_path_log)
+      restore_system_env("AVCS_FAKE_CODEX_CHILD_ENV_LOG", previous_child_env_log)
       File.rm_rf!(tmp_dir)
     end)
 
@@ -108,6 +113,23 @@ defmodule Avcs.Agent.CodexClientTest do
            |> File.read!()
            |> String.split(":", trim: true)
            |> List.first() == nvm_bin
+  end
+
+  test "app-server process receives Vercel AI Gateway environment", %{tmp_dir: tmp_dir} do
+    env_log = Path.join(tmp_dir, "child-env.log")
+    System.put_env("AVCS_FAKE_CODEX_CHILD_ENV_LOG", env_log)
+
+    assert {:ok, _settings} =
+             Avcs.SiteSettings.update_settings(%{
+               "providers.vercel_ai_gateway.api_key" => "vercel-client-key"
+             })
+
+    assert {:ok, [%{"id" => "fake-model"}]} = Avcs.Agent.CodexClient.list_models()
+
+    env = File.read!(env_log)
+    assert env =~ "AI_GATEWAY_API_KEY=vercel-client-key"
+    assert env =~ "OPENAI_API_KEY=vercel-client-key"
+    assert env =~ "OPENAI_BASE_URL=https://ai-gateway.vercel.sh/v1"
   end
 
   test "run_turn is driven by app-server messages without restarting the port", %{
@@ -354,9 +376,12 @@ defmodule Avcs.Agent.CodexClientTest do
     assert instructions =~ "不要将图片任务改写成 HTML/CSS/DOM/SVG/Canvas/WebGL 页面"
     assert instructions =~ "不要通过 Chrome、Chromium、Playwright、Puppeteer"
     assert instructions =~ "不要改用 HTML 排版或浏览器截图"
-    assert instructions =~ "/skills/avcs-imagegen/SKILL.md"
+    assert instructions =~ "avcs-imagegen-codex"
+    assert instructions =~ "/skills/avcs-imagegen-codex/SKILL.md"
+    refute instructions =~ "avcs-imagegen-avcs-agent"
     refute instructions =~ "{{project_path}}"
     refute instructions =~ "{{project_output_dir}}"
+    refute instructions =~ "{{avcs_imagegen_skill_name}}"
     refute instructions =~ "{{avcs_imagegen_skill_path}}"
   end
 
@@ -673,6 +698,14 @@ defmodule Avcs.Agent.CodexClientTest do
 
     if [ -n "$AVCS_FAKE_CODEX_CHILD_PATH_LOG" ]; then
       printf '%s\\n' "$PATH" > "$AVCS_FAKE_CODEX_CHILD_PATH_LOG"
+    fi
+
+    if [ -n "$AVCS_FAKE_CODEX_CHILD_ENV_LOG" ]; then
+      {
+        printf 'AI_GATEWAY_API_KEY=%s\\n' "$AI_GATEWAY_API_KEY"
+        printf 'OPENAI_API_KEY=%s\\n' "$OPENAI_API_KEY"
+        printf 'OPENAI_BASE_URL=%s\\n' "$OPENAI_BASE_URL"
+      } > "$AVCS_FAKE_CODEX_CHILD_ENV_LOG"
     fi
 
     printf '%s\\n' "$$" >> "$AVCS_FAKE_CODEX_LOG"

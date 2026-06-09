@@ -50,7 +50,7 @@ defmodule AvcsWeb.AvcsChannelTest do
     end
   end
 
-  defmodule ActiveSteerClient do
+  defmodule ActiveSteerHarness do
     def active_turn(_project, _thread_id) do
       {:ok, %{turn_id: Application.fetch_env!(:avcs, :channel_active_turn_id), worker: self()}}
     end
@@ -67,7 +67,9 @@ defmodule AvcsWeb.AvcsChannelTest do
     end
   end
 
-  defmodule QueuedPoolClient do
+  defmodule QueuedPoolHarness do
+    def pool_managed?, do: true
+
     def active_turn(_project, _thread_id), do: :none
 
     def steer_turn(_project, _thread_id, _text, _reference_paths, _opts) do
@@ -78,7 +80,7 @@ defmodule AvcsWeb.AvcsChannelTest do
           _project,
           _thread_id,
           _turn_id,
-          _codex_thread_id,
+          _remote_thread_id,
           _text,
           _reference_paths,
           _on_event,
@@ -90,8 +92,8 @@ defmodule AvcsWeb.AvcsChannelTest do
         :finish ->
           {:ok,
            %{
-             codex_thread_id: "codex-thread-queued",
-             codex_turn_id: "codex-turn-queued",
+             remote_thread_id: "codex-thread-queued",
+             remote_turn_id: "codex-turn-queued",
              assistant_text: "",
              items: [],
              thread_name: nil
@@ -103,8 +105,8 @@ defmodule AvcsWeb.AvcsChannelTest do
     end
   end
 
-  defmodule BlockingModelsClient do
-    def list_models do
+  defmodule BlockingModelsHarness do
+    def list_models(_opts) do
       send(Application.fetch_env!(:avcs, :channel_test_pid), {:models_list_started, self()})
 
       receive do
@@ -119,7 +121,7 @@ defmodule AvcsWeb.AvcsChannelTest do
 
   setup do
     previous_runner = Application.get_env(:avcs, :agent_runner)
-    previous_client = Application.get_env(:avcs, :codex_client)
+    previous_harness = Application.get_env(:avcs, :agent_harness)
     previous_test_pid = Application.get_env(:avcs, :channel_test_pid)
     previous_active_turn_id = Application.get_env(:avcs, :channel_active_turn_id)
     Application.put_env(:avcs, :agent_runner, NoopRunner)
@@ -139,10 +141,10 @@ defmodule AvcsWeb.AvcsChannelTest do
         Application.delete_env(:avcs, :agent_runner)
       end
 
-      if previous_client do
-        Application.put_env(:avcs, :codex_client, previous_client)
+      if previous_harness do
+        Application.put_env(:avcs, :agent_harness, previous_harness)
       else
-        Application.delete_env(:avcs, :codex_client)
+        Application.delete_env(:avcs, :agent_harness)
       end
 
       if previous_test_pid do
@@ -205,8 +207,12 @@ defmodule AvcsWeb.AvcsChannelTest do
     assert settings["agent.default_approval_policy"] == "never"
     assert settings["agent.default_model"] == "gpt-5.5"
     assert settings["agent.default_effort"] == "medium"
+    assert settings["providers.vercel_ai_gateway.api_key"] == nil
     assert settings["ui.locale"] == "en"
     assert Enum.any?(items, &(&1.key == "projects.default_root"))
+    assert provider_item = Enum.find(items, &(&1.key == "providers.vercel_ai_gateway.api_key"))
+    assert provider_item.is_secret == true
+    assert provider_item.has_value == false
     assert Enum.any?(items, &(&1.key == "ui.locale"))
 
     update_ref =
@@ -216,23 +222,41 @@ defmodule AvcsWeb.AvcsChannelTest do
           "image.default_ratio" => "1:3",
           "image.default_count" => 2,
           "image.transparent_background" => true,
+          "providers.vercel_ai_gateway.api_key" => "vercel-channel-key",
           "ui.locale" => "zh-hans"
         }
       })
 
     assert_reply update_ref, :ok, %{
       success: true,
-      data: %{settings: updated_settings}
+      data: %{items: updated_items, settings: updated_settings}
     }
 
     assert updated_settings["agent.default_model"] == "gpt-5"
     assert updated_settings["image.default_ratio"] == "1:3"
     assert updated_settings["image.default_count"] == 2
     assert updated_settings["image.transparent_background"] == true
+    assert updated_settings["providers.vercel_ai_gateway.api_key"] == nil
     assert updated_settings["ui.locale"] == "zh-hans"
-    assert_push "site_settings:updated", %{settings: pushed_settings}
+
+    assert provider_item =
+             Enum.find(updated_items, &(&1.key == "providers.vercel_ai_gateway.api_key"))
+
+    assert provider_item.has_value == true
+    assert provider_item.masked_value == "****-key"
+    refute inspect(updated_settings) =~ "vercel-channel-key"
+    refute inspect(updated_items) =~ "vercel-channel-key"
+
+    assert_push "site_settings:updated", %{items: pushed_items, settings: pushed_settings}
     assert pushed_settings["image.default_count"] == 2
+    assert pushed_settings["providers.vercel_ai_gateway.api_key"] == nil
     assert pushed_settings["ui.locale"] == "zh-hans"
+
+    pushed_provider_item =
+      Enum.find(pushed_items, &(&1.key == "providers.vercel_ai_gateway.api_key"))
+
+    assert pushed_provider_item.has_value == true
+    refute inspect(pushed_items) =~ "vercel-channel-key"
 
     invalid_ref =
       push(socket, "site_settings:update", %{
@@ -265,19 +289,31 @@ defmodule AvcsWeb.AvcsChannelTest do
     }
 
     reset_ref =
-      push(socket, "site_settings:reset", %{"keys" => ["image.default_count", "ui.locale"]})
+      push(socket, "site_settings:reset", %{
+        "keys" => [
+          "image.default_count",
+          "providers.vercel_ai_gateway.api_key",
+          "ui.locale"
+        ]
+      })
 
     assert_reply reset_ref, :ok, %{
       success: true,
-      data: %{settings: reset_settings}
+      data: %{items: reset_items, settings: reset_settings}
     }
 
     assert reset_settings["image.default_count"] == 1
+    assert reset_settings["providers.vercel_ai_gateway.api_key"] == nil
     assert reset_settings["ui.locale"] == "en"
+
+    reset_provider_item =
+      Enum.find(reset_items, &(&1.key == "providers.vercel_ai_gateway.api_key"))
+
+    assert reset_provider_item.has_value == false
   end
 
   test "models list does not block later websocket requests", %{socket: socket} do
-    Application.put_env(:avcs, :codex_client, BlockingModelsClient)
+    Application.put_env(:avcs, :agent_harness, BlockingModelsHarness)
 
     models_ref = push(socket, "models:list", %{})
     assert_receive {:models_list_started, models_pid}
@@ -317,7 +353,7 @@ defmodule AvcsWeb.AvcsChannelTest do
     socket: socket
   } do
     Application.put_env(:avcs, :agent_runner, Avcs.Agent.Runner)
-    Application.put_env(:avcs, :codex_client, ActiveSteerClient)
+    Application.put_env(:avcs, :agent_harness, ActiveSteerHarness)
 
     {:ok, thread} = Avcs.Threads.create_thread(project, "Active thread")
     {:ok, created} = Avcs.Turns.create_user_turn(project, thread["id"], "Original", [])
@@ -349,7 +385,7 @@ defmodule AvcsWeb.AvcsChannelTest do
     socket: socket
   } do
     Application.put_env(:avcs, :agent_runner, Avcs.Agent.Runner)
-    Application.put_env(:avcs, :codex_client, QueuedPoolClient)
+    Application.put_env(:avcs, :agent_harness, QueuedPoolHarness)
 
     {:ok, thread} = Avcs.Threads.create_thread(project, "Queued thread")
 
@@ -611,8 +647,8 @@ defmodule AvcsWeb.AvcsChannelTest do
     base_path = Path.join([project["folder_path"], "output", "base.png"])
     mask_path = Path.join([project["folder_path"], ".avcs", "cache", "temp", "masks", "mask.png"])
     File.mkdir_p!(Path.dirname(mask_path))
-    File.write!(base_path, test_png())
-    File.write!(mask_path, test_png_alt())
+    File.write!(base_path, test_png_alt())
+    File.write!(mask_path, test_png())
     {:ok, base_asset} = Avcs.Assets.upsert_asset(project, base_path, source: "generated")
     {:ok, mask_asset} = Avcs.Assets.upsert_asset(project, mask_path, source: "mask")
 
@@ -625,7 +661,7 @@ defmodule AvcsWeb.AvcsChannelTest do
           "mode" => "visual_reference",
           "base_asset_id" => base_asset["id"],
           "mask_asset_id" => mask_asset["id"],
-          "mask_semantics" => "white_edit_black_keep"
+          "mask_semantics" => "transparent_edit_opaque_keep"
         }
       })
 
@@ -774,7 +810,7 @@ defmodule AvcsWeb.AvcsChannelTest do
         event_name: "item_completed",
         thread_id: thread["id"],
         turn_id: created["turn"]["id"],
-        codex_item_id: "codex-item-1",
+        remote_item_id: "codex-item-1",
         status: "completed",
         payload: %{"futureField" => %{"version" => 2}},
         raw: %{"method" => "item/completed", "params" => %{"futureField" => true}},
@@ -918,7 +954,7 @@ defmodule AvcsWeb.AvcsChannelTest do
     }
 
     {:ok, approval_item} =
-      Avcs.Turns.upsert_codex_item(
+      Avcs.Turns.upsert_remote_item(
         project,
         Avcs.Agent.ApprovalReview.started_item_attrs(
           thread["id"],

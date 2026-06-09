@@ -5,6 +5,7 @@ import { SUPPORTED_LOCALES } from "../../i18n.js";
 
 const GROUPS = [
   ["agent", "Agent", "settings.group.agent"],
+  ["providers", "Providers", "settings.group.providers"],
   ["images", "Images", "settings.group.images"],
   ["projects", "Projects", "settings.group.projects"],
   ["assets", "Assets", "settings.group.assets"],
@@ -12,6 +13,18 @@ const GROUPS = [
 ];
 
 const SETTING_DEFS = [
+  {
+    key: "agent.harness",
+    group: "agent",
+    label: "Harness",
+    labelKey: "settings.setting.agent_harness",
+    type: "select",
+    options: [
+      ["auto", "Auto", "settings.option.harness_auto"],
+      ["codex", "Codex Agent", "settings.option.harness_codex"],
+      ["avcs_agent", "AvcsAgent", "settings.option.harness_avcs_agent"],
+    ],
+  },
   {
     key: "agent.default_model",
     group: "agent",
@@ -25,6 +38,7 @@ const SETTING_DEFS = [
     label: "Reasoning effort",
     labelKey: "settings.setting.agent_default_effort",
     type: "select",
+    codexOnly: true,
     options: [
       ["", "Codex config", "settings.option.codex_config"],
       ["none", "none"],
@@ -41,6 +55,7 @@ const SETTING_DEFS = [
     label: "Approval policy",
     labelKey: "settings.setting.agent_default_approval_policy",
     type: "select",
+    codexOnly: true,
     options: [
       ["never", "No approval", "settings.option.no_approval"],
       ["on-request", "On request", "settings.option.on_request"],
@@ -54,11 +69,60 @@ const SETTING_DEFS = [
     label: "Sandbox mode",
     labelKey: "settings.setting.agent_default_sandbox_mode",
     type: "select",
+    codexOnly: true,
     options: [
       ["workspace-write", "Workspace write", "settings.option.workspace_write"],
       ["read-only", "Read only", "settings.option.read_only"],
       ["danger-full-access", "Full access", "settings.option.full_access"],
     ],
+  },
+  {
+    key: "agent.avcs_agent.text_model",
+    group: "agent",
+    label: "AvcsAgent text model",
+    labelKey: "settings.setting.avcs_agent_text_model",
+    type: "text",
+  },
+  {
+    key: "agent.avcs_agent.image_model",
+    group: "agent",
+    label: "AvcsAgent image model",
+    labelKey: "settings.setting.avcs_agent_image_model",
+    type: "text",
+  },
+  {
+    key: "agent.avcs_agent.max_tool_steps",
+    group: "agent",
+    label: "AvcsAgent max tool steps",
+    labelKey: "settings.setting.avcs_agent_max_tool_steps",
+    type: "number",
+    min: 1,
+    max: 10,
+    step: 1,
+  },
+  {
+    key: "agent.avcs_agent.compact_threshold",
+    group: "agent",
+    label: "AvcsAgent compact threshold",
+    labelKey: "settings.setting.avcs_agent_compact_threshold",
+    type: "number",
+    min: 0.1,
+    max: 0.95,
+    step: 0.05,
+  },
+  {
+    key: "agent.avcs_agent.base_url",
+    group: "providers",
+    label: "AvcsAgent base URL",
+    labelKey: "settings.setting.avcs_agent_base_url",
+    type: "text",
+  },
+  {
+    key: "providers.vercel_ai_gateway.api_key",
+    group: "providers",
+    label: "Vercel AI Gateway API key",
+    labelKey: "settings.setting.vercel_ai_gateway_api_key",
+    type: "secret",
   },
   {
     key: "image.default_ratio",
@@ -133,10 +197,17 @@ const SETTING_DEFS = [
 ];
 
 const DEFAULT_SETTINGS = {
+  "agent.harness": "codex",
   "agent.default_model": "gpt-5.5",
   "agent.default_effort": "medium",
   "agent.default_approval_policy": "never",
   "agent.default_sandbox_mode": "workspace-write",
+  "agent.avcs_agent.base_url": "https://ai-gateway.vercel.sh/v1",
+  "agent.avcs_agent.text_model": "deepseek/deepseek-v4-pro",
+  "agent.avcs_agent.image_model": "openai/gpt-image-2",
+  "agent.avcs_agent.max_tool_steps": 3,
+  "agent.avcs_agent.compact_threshold": 0.75,
+  "providers.vercel_ai_gateway.api_key": null,
   "image.default_ratio": "auto",
   "image.default_count": 1,
   "image.transparent_background": false,
@@ -156,6 +227,7 @@ export default function SettingsPage({
   t = defaultT,
   onSave,
   onReset,
+  onTestAvcsAgent,
   onBack,
   onConfirm = async () => false,
 }) {
@@ -169,6 +241,8 @@ export default function SettingsPage({
   const [saving, setSaving] = useState(false);
   const [resettingKey, setResettingKey] = useState("");
   const [error, setError] = useState("");
+  const [testingAvcsAgent, setTestingAvcsAgent] = useState(false);
+  const [testResult, setTestResult] = useState("");
   const itemsByKey = useMemo(
     () => new Map(settingsItems.map((item) => [item.key, item])),
     [settingsItems],
@@ -251,6 +325,28 @@ export default function SettingsPage({
     }
 
     onBack();
+  }
+
+  async function handleTestAvcsAgent() {
+    if (!onTestAvcsAgent || testingAvcsAgent || connectionState !== "online") return;
+
+    setTestingAvcsAgent(true);
+    setTestResult("");
+    setError("");
+
+    try {
+      const result = await onTestAvcsAgent();
+      const count = result?.models_count;
+      setTestResult(
+        typeof count === "number"
+          ? t("settings.avcs_agent_test_ok_models", { count })
+          : t("settings.avcs_agent_test_ok"),
+      );
+    } catch (testError) {
+      setError(testError.message);
+    } finally {
+      setTestingAvcsAgent(false);
+    }
   }
 
   return (
@@ -339,7 +435,14 @@ export default function SettingsPage({
                       <span className={stateKey}>{stateLabel}</span>
                     </div>
                     <div className="settings-row-control">
-                      {renderControl(definition, draft, patchDraft, modelSelectOptions, t)}
+                      {renderControl(
+                        definition,
+                        draft,
+                        patchDraft,
+                        modelSelectOptions,
+                        t,
+                        item,
+                      )}
                     </div>
                     <button
                       className="settings-row-reset"
@@ -359,6 +462,24 @@ export default function SettingsPage({
               })}
             </div>
 
+            {activeGroup === "providers" ? (
+              <div className="settings-inline-test">
+                <button
+                  className="settings-action secondary"
+                  type="button"
+                  disabled={!onTestAvcsAgent || testingAvcsAgent || connectionState !== "online"}
+                  onClick={handleTestAvcsAgent}
+                >
+                  <span>
+                    {testingAvcsAgent
+                      ? t("settings.action.testing")
+                      : t("settings.action.test_avcs_agent")}
+                  </span>
+                </button>
+                {testResult ? <span className="configured">{testResult}</span> : null}
+              </div>
+            ) : null}
+
             {error ? (
               <div className="settings-error" role="alert">
                 {error}
@@ -371,9 +492,12 @@ export default function SettingsPage({
   );
 }
 
-function renderControl(definition, draft, patchDraft, modelSelectOptions, t) {
+function renderControl(definition, draft, patchDraft, modelSelectOptions, t, item) {
   const value = draft[definition.key];
   const inputId = settingInputId(definition.key);
+  const disabled = Boolean(
+    definition.codexOnly && draft["agent.harness"] === "avcs_agent",
+  );
 
   if (definition.type === "checkbox") {
     return (
@@ -382,6 +506,7 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions, t) {
           id={inputId}
           type="checkbox"
           checked={Boolean(value)}
+          disabled={disabled}
           onChange={(event) => patchDraft(definition.key, event.target.checked)}
         />
         <span>{Boolean(value) ? t("common.on") : t("common.off")}</span>
@@ -399,6 +524,7 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions, t) {
           value={value || ""}
           placeholder={t("settings.option.codex_config")}
           autoComplete="off"
+          disabled={disabled}
           onChange={(event) => patchDraft(definition.key, event.target.value)}
         />
         <datalist id="settings-model-options">
@@ -412,6 +538,35 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions, t) {
     );
   }
 
+  if (definition.type === "secret") {
+    const configured = Boolean(item?.has_value);
+    const maskedValue = item?.masked_value || "";
+
+    return (
+      <div className="settings-secret-control">
+        <input
+          id={inputId}
+          className="settings-input"
+          type="password"
+          value={value || ""}
+          placeholder={
+            configured
+              ? t("settings.secret.keep_existing")
+              : t("settings.secret.not_configured")
+          }
+          autoComplete="new-password"
+          disabled={disabled}
+          onChange={(event) => patchDraft(definition.key, event.target.value)}
+        />
+        <span className={configured ? "configured" : ""}>
+          {configured
+            ? [t("settings.secret.configured"), maskedValue].filter(Boolean).join(" - ")
+            : t("settings.secret.empty")}
+        </span>
+      </div>
+    );
+  }
+
   if (definition.type === "text") {
     return (
       <input
@@ -419,6 +574,24 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions, t) {
         className="settings-input"
         value={value || ""}
         autoComplete="off"
+        disabled={disabled}
+        onChange={(event) => patchDraft(definition.key, event.target.value)}
+      />
+    );
+  }
+
+  if (definition.type === "number") {
+    return (
+      <input
+        id={inputId}
+        className="settings-input"
+        type="number"
+        min={definition.min}
+        max={definition.max}
+        step={definition.step}
+        value={value ?? ""}
+        autoComplete="off"
+        disabled={disabled}
         onChange={(event) => patchDraft(definition.key, event.target.value)}
       />
     );
@@ -429,6 +602,7 @@ function renderControl(definition, draft, patchDraft, modelSelectOptions, t) {
       id={inputId}
       className="settings-input"
       value={value ?? ""}
+      disabled={disabled}
       onChange={(event) => {
         const selected = definition.options.find(
           ([optionValue]) => String(optionValue) === event.target.value,
@@ -449,12 +623,16 @@ function valuesFromSettings(items, settings) {
   const itemValues = new Map((items || []).map((item) => [item.key, item.value]));
 
   return Object.fromEntries(
-    SETTING_DEFS.map((definition) => [
-      definition.key,
-      Object.prototype.hasOwnProperty.call(settings || {}, definition.key)
-        ? settings[definition.key]
-        : itemValues.get(definition.key) ?? DEFAULT_SETTINGS[definition.key],
-    ]),
+    SETTING_DEFS.map((definition) => {
+      if (definition.type === "secret") return [definition.key, ""];
+
+      return [
+        definition.key,
+        Object.prototype.hasOwnProperty.call(settings || {}, definition.key)
+          ? settings[definition.key]
+          : itemValues.get(definition.key) ?? DEFAULT_SETTINGS[definition.key],
+      ];
+    }),
   );
 }
 
@@ -476,12 +654,20 @@ function normalizeDraftValue(definition, value) {
     return clean ? clean : null;
   }
 
+  if (definition.type === "secret") {
+    return String(value || "").trim();
+  }
+
   if (definition.key === "agent.default_effort") {
     return value || null;
   }
 
   if (definition.key === "image.default_count") {
     return Number(value) || 1;
+  }
+
+  if (definition.type === "number") {
+    return Number(value);
   }
 
   if (definition.type === "text") {

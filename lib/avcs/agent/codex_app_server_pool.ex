@@ -49,6 +49,10 @@ defmodule Avcs.Agent.CodexAppServerPool do
     GenServer.call(server_name(), :list_models, :infinity)
   end
 
+  def available? do
+    Avcs.Agent.CodexClient.available?()
+  end
+
   def read_thread(codex_thread_id, opts \\ []) do
     timeout = Keyword.get(opts, :timeout_ms, @call_timeout_ms)
 
@@ -116,6 +120,10 @@ defmodule Avcs.Agent.CodexAppServerPool do
     GenServer.call(server_name(), :stats, @call_timeout_ms)
   end
 
+  def provider_settings_changed do
+    GenServer.call(server_name(), :provider_settings_changed, @call_timeout_ms)
+  end
+
   @impl true
   def init(opts) do
     state = %{
@@ -143,6 +151,7 @@ defmodule Avcs.Agent.CodexAppServerPool do
       codex_routes: %{},
       active_by_local: %{},
       active_by_turn: %{},
+      provider_settings_generation: 0,
       waiting: :queue.new()
     }
 
@@ -241,8 +250,18 @@ defmodule Avcs.Agent.CodexAppServerPool do
        waiting_count: :queue.len(state.waiting),
        local_routes: state.local_routes,
        codex_routes: state.codex_routes,
-       active_by_local: state.active_by_local
+       active_by_local: state.active_by_local,
+       provider_settings_generation: state.provider_settings_generation
      }, state}
+  end
+
+  def handle_call(:provider_settings_changed, _from, state) do
+    state =
+      %{state | provider_settings_generation: state.provider_settings_generation + 1}
+      |> shutdown_stale_idle_workers()
+      |> dispatch_waiting()
+
+    {:reply, :ok, state}
   end
 
   @impl true
@@ -252,6 +271,7 @@ defmodule Avcs.Agent.CodexAppServerPool do
       |> bind_result_codex_thread(worker, request, result)
       |> clear_active_request(worker, request)
       |> mark_worker_idle(worker)
+      |> shutdown_stale_idle_workers()
       |> dispatch_waiting()
 
     {:noreply, state}
@@ -277,6 +297,7 @@ defmodule Avcs.Agent.CodexAppServerPool do
   def handle_info(:idle_check, state) do
     state =
       state
+      |> shutdown_stale_idle_workers()
       |> shutdown_idle_workers()
       |> dispatch_waiting()
 
@@ -354,6 +375,9 @@ defmodule Avcs.Agent.CodexAppServerPool do
       not worker_alive?(state, worker) ->
         checkout_unrouted_worker(remove_worker(state, worker))
 
+      worker_stale?(state, worker) and worker_idle?(state, worker) ->
+        checkout_unrouted_worker(terminate_worker(state, worker))
+
       worker_idle?(state, worker) ->
         {:ok, worker, state}
 
@@ -363,6 +387,8 @@ defmodule Avcs.Agent.CodexAppServerPool do
   end
 
   defp checkout_unrouted_worker(state) do
+    state = shutdown_stale_idle_workers(state)
+
     case idle_worker(state) do
       nil ->
         if map_size(state.workers) < state.max_concurrency do
@@ -402,7 +428,8 @@ defmodule Avcs.Agent.CodexAppServerPool do
         state =
           put_in(state.workers[worker], %{
             active: nil,
-            last_used: now_ms()
+            last_used: now_ms(),
+            provider_settings_generation: state.provider_settings_generation
           })
 
         {:ok, worker, state}
@@ -729,6 +756,28 @@ defmodule Avcs.Agent.CodexAppServerPool do
   defp worker_alive?(state, worker),
     do: Map.has_key?(state.workers, worker) and Process.alive?(worker)
 
+  defp worker_stale?(state, worker) do
+    case Map.get(state.workers, worker) do
+      %{provider_settings_generation: generation} ->
+        generation != state.provider_settings_generation
+
+      _meta ->
+        false
+    end
+  end
+
+  defp shutdown_stale_idle_workers(state) do
+    state.workers
+    |> Enum.reduce(state, fn
+      {worker, %{active: nil, provider_settings_generation: generation}}, acc
+      when generation != acc.provider_settings_generation ->
+        terminate_worker(acc, worker)
+
+      _entry, acc ->
+        acc
+    end)
+  end
+
   defp shutdown_idle_workers(state) do
     now = now_ms()
 
@@ -756,6 +805,11 @@ defmodule Avcs.Agent.CodexAppServerPool do
         active_by_local: drop_routes_for_worker(state.active_by_local, worker),
         active_by_turn: drop_routes_for_worker(state.active_by_turn, worker)
     }
+  end
+
+  defp terminate_worker(state, worker) do
+    DynamicSupervisor.terminate_child(state.supervisor, worker)
+    remove_worker(state, worker)
   end
 
   defp drop_routes_for_worker(routes, worker) do

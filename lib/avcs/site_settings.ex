@@ -9,10 +9,17 @@ defmodule Avcs.SiteSettings do
   alias Avcs.Storage.SQLite
 
   @setting_order [
+    "agent.harness",
     "agent.default_model",
     "agent.default_effort",
     "agent.default_approval_policy",
     "agent.default_sandbox_mode",
+    "agent.avcs_agent.base_url",
+    "agent.avcs_agent.text_model",
+    "agent.avcs_agent.image_model",
+    "agent.avcs_agent.max_tool_steps",
+    "agent.avcs_agent.compact_threshold",
+    "providers.vercel_ai_gateway.api_key",
     "image.default_ratio",
     "image.default_count",
     "image.transparent_background",
@@ -23,10 +30,17 @@ defmodule Avcs.SiteSettings do
   ]
 
   @defaults %{
+    "agent.harness" => "codex",
     "agent.default_model" => "gpt-5.5",
     "agent.default_effort" => "medium",
     "agent.default_approval_policy" => "never",
     "agent.default_sandbox_mode" => "workspace-write",
+    "agent.avcs_agent.base_url" => "https://ai-gateway.vercel.sh/v1",
+    "agent.avcs_agent.text_model" => "deepseek/deepseek-v4-pro",
+    "agent.avcs_agent.image_model" => "openai/gpt-image-2",
+    "agent.avcs_agent.max_tool_steps" => 3,
+    "agent.avcs_agent.compact_threshold" => 0.75,
+    "providers.vercel_ai_gateway.api_key" => nil,
     "image.default_ratio" => "auto",
     "image.default_count" => 1,
     "image.transparent_background" => false,
@@ -39,8 +53,12 @@ defmodule Avcs.SiteSettings do
   @valid_efforts ~w(none minimal low medium high xhigh)
   @valid_approval_policies ~w(never untrusted on-failure on-request)
   @valid_sandbox_modes ~w(read-only workspace-write danger-full-access)
+  @valid_harnesses ~w(auto codex avcs_agent)
   @valid_image_ratios ~w(auto 1:1 16:9 9:16 4:3 3:4 3:1 1:3)
   @valid_locales ~w(en zh-hans)
+  @secret_keys [
+    "providers.vercel_ai_gateway.api_key"
+  ]
 
   def keys, do: @setting_order
   def defaults, do: @defaults
@@ -56,11 +74,82 @@ defmodule Avcs.SiteSettings do
     with :ok <- ensure_registered(key),
          {:ok, rows} <- stored_settings() do
       stored = Map.new(rows, &{&1["key"], &1})
-      {:ok, effective_value(key, stored[key])}
+      {:ok, public_value(key, stored[key])}
     end
   end
 
   def get_setting(_key), do: {:error, {:unknown_site_setting, nil}}
+
+  def secret_value(key) when is_binary(key) do
+    with :ok <- ensure_registered(key),
+         :ok <- ensure_secret(key),
+         {:ok, rows} <- stored_settings() do
+      stored = Map.new(rows, &{&1["key"], &1})
+      {:ok, secret_effective_value(key, stored[key])}
+    end
+  end
+
+  def secret_value(_key), do: {:error, {:unknown_site_setting, nil}}
+
+  def provider_runtime_settings do
+    {:ok, api_key} = secret_value("providers.vercel_ai_gateway.api_key")
+
+    %{
+      vercel_ai_gateway_api_key: normalize_optional_string(api_key)
+    }
+  rescue
+    _exception ->
+      %{vercel_ai_gateway_api_key: nil}
+  end
+
+  def avcs_agent_runtime_settings do
+    settings =
+      case effective_settings() do
+        {:ok, settings} -> settings
+        {:error, _reason} -> @defaults
+      end
+
+    {:ok, api_key} = secret_value("providers.vercel_ai_gateway.api_key")
+
+    %{
+      harness: settings["agent.harness"] || @defaults["agent.harness"],
+      base_url:
+        normalize_optional_string(settings["agent.avcs_agent.base_url"]) ||
+          @defaults["agent.avcs_agent.base_url"],
+      api_key: normalize_optional_string(api_key),
+      text_model:
+        normalize_optional_string(settings["agent.avcs_agent.text_model"]) ||
+          @defaults["agent.avcs_agent.text_model"],
+      image_model:
+        normalize_optional_string(settings["agent.avcs_agent.image_model"]) ||
+          @defaults["agent.avcs_agent.image_model"],
+      max_tool_steps:
+        normalize_positive_integer(
+          settings["agent.avcs_agent.max_tool_steps"],
+          @defaults["agent.avcs_agent.max_tool_steps"]
+        ),
+      compact_threshold:
+        normalize_float_between(
+          settings["agent.avcs_agent.compact_threshold"],
+          @defaults["agent.avcs_agent.compact_threshold"],
+          0.1,
+          0.95
+        )
+    }
+  rescue
+    _exception ->
+      %{
+        harness: @defaults["agent.harness"],
+        base_url: @defaults["agent.avcs_agent.base_url"],
+        api_key: nil,
+        text_model: @defaults["agent.avcs_agent.text_model"],
+        image_model: @defaults["agent.avcs_agent.image_model"],
+        max_tool_steps: @defaults["agent.avcs_agent.max_tool_steps"],
+        compact_threshold: @defaults["agent.avcs_agent.compact_threshold"]
+      }
+  end
+
+  def secret_key?(key), do: key in @secret_keys
 
   def effective_settings do
     with {:ok, items} <- list_settings() do
@@ -132,6 +221,7 @@ defmodule Avcs.SiteSettings do
     case effective_settings() do
       {:ok, settings} ->
         %{
+          harness: settings["agent.harness"] || @defaults["agent.harness"],
           model: normalize_optional_string(settings["agent.default_model"]),
           effort: normalize_optional_string(settings["agent.default_effort"]),
           approval_policy: settings["agent.default_approval_policy"] || "never",
@@ -140,6 +230,7 @@ defmodule Avcs.SiteSettings do
 
       {:error, _reason} ->
         %{
+          harness: @defaults["agent.harness"],
           model: @defaults["agent.default_model"],
           effort: @defaults["agent.default_effort"],
           approval_policy: "never",
@@ -208,12 +299,32 @@ defmodule Avcs.SiteSettings do
   end
 
   defp setting_item(key, row) do
+    if secret_key?(key) do
+      secret_setting_item(key, row)
+    else
+      %{
+        key: key,
+        value: effective_value(key, row),
+        default_value: Map.fetch!(@defaults, key),
+        is_default: row == nil,
+        updated_at: row && row["updated_at"]
+      }
+    end
+  end
+
+  defp secret_setting_item(key, row) do
+    secret_value = secret_effective_value(key, row)
+    has_value = is_binary(secret_value) and secret_value != ""
+
     %{
       key: key,
-      value: effective_value(key, row),
-      default_value: Map.fetch!(@defaults, key),
-      is_default: row == nil,
-      updated_at: row && row["updated_at"]
+      value: nil,
+      default_value: nil,
+      is_default: not has_value,
+      updated_at: row && row["updated_at"],
+      is_secret: true,
+      has_value: has_value,
+      masked_value: masked_secret(secret_value)
     }
   end
 
@@ -221,6 +332,33 @@ defmodule Avcs.SiteSettings do
 
   defp effective_value(key, %{"value" => value}),
     do: decode_value(value, Map.fetch!(@defaults, key))
+
+  defp public_value(key, row) do
+    if secret_key?(key) do
+      nil
+    else
+      effective_value(key, row)
+    end
+  end
+
+  defp secret_effective_value(_key, nil), do: nil
+
+  defp secret_effective_value(key, %{"value" => value}) do
+    value
+    |> decode_value(Map.fetch!(@defaults, key))
+    |> normalize_optional_string()
+  end
+
+  defp masked_secret(value) when is_binary(value) and value != "" do
+    suffix =
+      value
+      |> String.slice(-4, 4)
+      |> to_string()
+
+    "****" <> suffix
+  end
+
+  defp masked_secret(_value), do: nil
 
   defp decode_value(value, fallback) when is_binary(value) do
     case Jason.decode(value) do
@@ -273,6 +411,18 @@ defmodule Avcs.SiteSettings do
     end
   end
 
+  defp ensure_secret(key) do
+    if secret_key?(key) do
+      :ok
+    else
+      {:error, {:unknown_site_setting, key}}
+    end
+  end
+
+  defp normalize_setting("agent.harness" = key, value) do
+    normalize_member(key, value, @valid_harnesses)
+  end
+
   defp normalize_setting("agent.default_model" = key, value) do
     case normalize_optional_string(value) do
       nil -> {:ok, nil}
@@ -292,12 +442,57 @@ defmodule Avcs.SiteSettings do
     end
   end
 
+  defp normalize_setting("providers.vercel_ai_gateway.api_key" = key, value) do
+    case normalize_optional_string(value) do
+      nil -> {:error, {:invalid_site_setting, key}}
+      clean -> {:ok, clean}
+    end
+  rescue
+    _exception -> {:error, {:invalid_site_setting, key}}
+  end
+
   defp normalize_setting("agent.default_approval_policy" = key, value) do
     normalize_member(key, value, @valid_approval_policies)
   end
 
   defp normalize_setting("agent.default_sandbox_mode" = key, value) do
     normalize_member(key, value, @valid_sandbox_modes)
+  end
+
+  defp normalize_setting("agent.avcs_agent.base_url" = key, value) do
+    case normalize_optional_string(value) do
+      "http://" <> _rest = url -> {:ok, String.trim_trailing(url, "/")}
+      "https://" <> _rest = url -> {:ok, String.trim_trailing(url, "/")}
+      _value -> {:error, {:invalid_site_setting, key}}
+    end
+  end
+
+  defp normalize_setting(key, value)
+       when key in ["agent.avcs_agent.text_model", "agent.avcs_agent.image_model"] do
+    case normalize_optional_string(value) do
+      nil -> {:error, {:invalid_site_setting, key}}
+      clean -> {:ok, clean}
+    end
+  end
+
+  defp normalize_setting("agent.avcs_agent.max_tool_steps" = key, value) do
+    steps = normalize_positive_integer(value, nil)
+
+    if is_integer(steps) and steps >= 1 and steps <= 10 do
+      {:ok, steps}
+    else
+      {:error, {:invalid_site_setting, key}}
+    end
+  end
+
+  defp normalize_setting("agent.avcs_agent.compact_threshold" = key, value) do
+    threshold = normalize_float_between(value, nil, 0.1, 0.95)
+
+    if is_float(threshold) do
+      {:ok, threshold}
+    else
+      {:error, {:invalid_site_setting, key}}
+    end
   end
 
   defp normalize_setting("image.default_ratio" = key, value) do
@@ -379,4 +574,39 @@ defmodule Avcs.SiteSettings do
   defp normalize_boolean("true"), do: {:ok, true}
   defp normalize_boolean("false"), do: {:ok, false}
   defp normalize_boolean(_value), do: :error
+
+  defp normalize_positive_integer(value, _fallback) when is_integer(value) and value > 0,
+    do: value
+
+  defp normalize_positive_integer(value, fallback) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {integer, ""} when integer > 0 -> integer
+      _other -> fallback
+    end
+  end
+
+  defp normalize_positive_integer(_value, fallback), do: fallback
+
+  defp normalize_float_between(value, fallback, min, max) do
+    number =
+      cond do
+        is_float(value) -> value
+        is_integer(value) -> value * 1.0
+        is_binary(value) -> parse_float(value)
+        true -> nil
+      end
+
+    if is_float(number) and number >= min and number <= max do
+      number
+    else
+      fallback
+    end
+  end
+
+  defp parse_float(value) do
+    case Float.parse(String.trim(value)) do
+      {number, ""} -> number
+      _other -> nil
+    end
+  end
 end

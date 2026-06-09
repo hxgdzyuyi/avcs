@@ -78,8 +78,10 @@ defmodule Mix.Tasks.MockManyTurns do
         Mix.raise("turn_count must be > 0: #{count}")
 
       count > max_turn_count ->
-        Mix.raise("turn_count exceeds max(#{max_turn_count}) for path #{path}: #{count}\n" <>
-          "Set #{_env_key()} to a larger integer to override.")
+        Mix.raise(
+          "turn_count exceeds max(#{max_turn_count}) for path #{path}: #{count}\n" <>
+            "Set #{_env_key()} to a larger integer to override."
+        )
 
       true ->
         :ok
@@ -106,33 +108,37 @@ defmodule Mix.Tasks.MockManyTurns do
 
     summary =
       case SQLite.with_db(project_db_path, fn db ->
-               SQLite.transaction!(db, fn ->
-                 ensure_schema!(db)
+             SQLite.transaction!(db, fn ->
+               ensure_schema!(db)
 
-                 thread_id = Ecto.UUID.generate()
-                 thread_title = "Mock Thread #{DateTime.to_iso8601(now)}"
-                 thread_at = timestamp(now, 0)
+               thread_id = Ecto.UUID.generate()
+               thread_title = "Mock Thread #{DateTime.to_iso8601(now)}"
+               thread_at = timestamp(now, 0)
 
-                 SQLite.run!(
-                   db,
-                   """
-                   INSERT INTO threads (id, title, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?)
-                   """,
-                   [thread_id, thread_title, "idle", thread_at, thread_at]
-                 )
+               SQLite.run!(
+                 db,
+                 """
+                 INSERT INTO threads (id, title, status, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?)
+                 """,
+                 [thread_id, thread_title, "idle", thread_at, thread_at]
+               )
 
-                 inserted = do_insert_turns(db, thread_id, turn_count, now)
+               inserted = do_insert_turns(db, thread_id, turn_count, now)
 
-                 SQLite.run!(
-                   db,
-                   "UPDATE threads SET updated_at = ? WHERE id = ?",
-                   [timestamp(now, turn_count * 700), thread_id]
-                 )
+               SQLite.run!(
+                 db,
+                 "UPDATE threads SET updated_at = ? WHERE id = ?",
+                 [timestamp(now, turn_count * 700), thread_id]
+               )
 
-                 %{thread_id: thread_id, items_count: inserted.items_count, turn_count: inserted.turn_count}
-               end)
-             end) do
+               %{
+                 thread_id: thread_id,
+                 items_count: inserted.items_count,
+                 turn_count: inserted.turn_count
+               }
+             end)
+           end) do
         {:ok, summary} ->
           summary
 
@@ -175,7 +181,16 @@ defmodule Mix.Tasks.MockManyTurns do
         ]
       )
 
-      item_count = insert_mock_items(db, thread_id, turn_id, index, now, index * 720 + :rand.uniform(200), turn_status)
+      item_count =
+        insert_mock_items(
+          db,
+          thread_id,
+          turn_id,
+          index,
+          now,
+          index * 720 + :rand.uniform(200),
+          turn_status
+        )
 
       if rem(index, 10) == 0 do
         Mix.shell().info("inserted #{index}/#{turn_count} turns")
@@ -189,13 +204,18 @@ defmodule Mix.Tasks.MockManyTurns do
     user_item_time = timestamp(now, turn_time_ms)
 
     user_item_payload =
-      Jason.encode!(%{"source" => "mock", "mock_index" => index, "asset_ids" => [], "role" => "user"})
+      Jason.encode!(%{
+        "source" => "mock",
+        "mock_index" => index,
+        "asset_ids" => [],
+        "role" => "user"
+      })
 
     SQLite.run!(
       db,
       """
       INSERT INTO items (
-        id, turn_id, thread_id, codex_item_id, type, role, content, payload,
+        id, turn_id, thread_id, remote_item_id, type, role, content, payload,
         status, created_at, updated_at
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -217,37 +237,45 @@ defmodule Mix.Tasks.MockManyTurns do
 
     extra_count = random_item_count()
 
-    inserted = Enum.reduce(1..extra_count, 1, fn seq, acc ->
-      assistant_time = timestamp(now, turn_time_ms + seq * 60)
-      payload =
-        Jason.encode!(%{"source" => "mock", "mock_index" => index, "asset_ids" => [], "seq" => seq, "role" => "assistant"})
+    inserted =
+      Enum.reduce(1..extra_count, 1, fn seq, acc ->
+        assistant_time = timestamp(now, turn_time_ms + seq * 60)
 
-      SQLite.run!(
-        db,
-        """
-        INSERT INTO items (
-          id, turn_id, thread_id, codex_item_id, type, role, content, payload,
-          status, created_at, updated_at
+        payload =
+          Jason.encode!(%{
+            "source" => "mock",
+            "mock_index" => index,
+            "asset_ids" => [],
+            "seq" => seq,
+            "role" => "assistant"
+          })
+
+        SQLite.run!(
+          db,
+          """
+          INSERT INTO items (
+            id, turn_id, thread_id, remote_item_id, type, role, content, payload,
+            status, created_at, updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """,
+          [
+            Ecto.UUID.generate(),
+            turn_id,
+            thread_id,
+            nil,
+            random_item_type(),
+            "assistant",
+            random_assistant_message(index, seq),
+            payload,
+            item_status(turn_status),
+            assistant_time,
+            assistant_time
+          ]
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-          Ecto.UUID.generate(),
-          turn_id,
-          thread_id,
-          nil,
-          random_item_type(),
-          "assistant",
-          random_assistant_message(index, seq),
-          payload,
-          item_status(turn_status),
-          assistant_time,
-          assistant_time
-        ]
-      )
 
-      acc + 1
-    end)
+        acc + 1
+      end)
 
     if turn_status == "failed" do
       err_time = timestamp(now, turn_time_ms + (extra_count + 1) * 80)
@@ -257,7 +285,7 @@ defmodule Mix.Tasks.MockManyTurns do
         db,
         """
         INSERT INTO items (
-          id, turn_id, thread_id, codex_item_id, type, role, content, payload,
+          id, turn_id, thread_id, remote_item_id, type, role, content, payload,
           status, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -323,19 +351,22 @@ defmodule Mix.Tasks.MockManyTurns do
     ]
 
     words = Enum.random(8..20)
+
     Enum.map_join(1..words, " ", fn _ -> Enum.random(base) end) <>
       " (#{index})"
   end
 
   defp random_assistant_message(index, seq) do
     prefix = Enum.random(["Done:", "Noted:", "Applied:", "Result:", "Suggestion:", "Analysis:"])
-    suffix = Enum.random([
-      "generated mixed style output.",
-      "adjusted for stable layout.",
-      "kept contrast balanced.",
-      "with compact structure.",
-      "and concise commentary."
-    ])
+
+    suffix =
+      Enum.random([
+        "generated mixed style output.",
+        "adjusted for stable layout.",
+        "kept contrast balanced.",
+        "with compact structure.",
+        "and concise commentary."
+      ])
 
     phrase = String.duplicate("mocked ", Enum.random(1..4))
     "#{prefix} #{phrase}##{index}-#{seq} #{suffix}"
@@ -356,7 +387,9 @@ defmodule Mix.Tasks.MockManyTurns do
   end
 
   defp ensure_table_exists!(db, table) do
-    if is_nil(SQLite.scalar!(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", [table])) do
+    if is_nil(
+         SQLite.scalar!(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", [table])
+       ) do
       raise RuntimeError, "database missing required table: #{table}"
     end
   end

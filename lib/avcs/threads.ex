@@ -72,14 +72,15 @@ defmodule Avcs.Threads do
         db,
         """
         INSERT INTO threads (
-          id, title, default_model, default_effort, default_approval_policy,
+          id, title, agent_harness, default_model, default_effort, default_approval_policy,
           default_sandbox_mode, sidebar_order, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
           id,
           title,
+          defaults.harness,
           defaults.model,
           defaults.effort,
           defaults.approval_policy,
@@ -202,28 +203,37 @@ defmodule Avcs.Threads do
     end)
   end
 
-  def set_codex_thread_id(project, id, codex_thread_id) do
+  def set_remote_thread_id(project, id, remote_thread_id, opts \\ []) do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
       existing = SQLite.one!(db, "SELECT * FROM threads WHERE id = ? LIMIT 1", [id])
+      agent_harness = value(opts, "agent_harness")
 
       SQLite.run!(
         db,
-        "UPDATE threads SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
-        [codex_thread_id, Avcs.Time.now_iso(), id]
+        """
+        UPDATE threads
+        SET remote_thread_id = ?,
+            agent_harness = COALESCE(?, agent_harness),
+            updated_at = ?
+        WHERE id = ?
+        """,
+        [remote_thread_id, agent_harness, Avcs.Time.now_iso(), id]
       )
 
-      if existing && existing["codex_thread_id"] != codex_thread_id do
+      if existing && remote_thread_binding_changed?(existing, remote_thread_id, agent_harness) do
         Avcs.Trace.append_event(
           project,
           %{
             scope: "thread",
-            event_name: "thread_codex_id_bound",
+            event_name: "thread_remote_id_bound",
             thread_id: id,
-            codex_thread_id: codex_thread_id,
+            agent_harness: agent_harness || existing["agent_harness"],
+            remote_thread_id: remote_thread_id,
             status: existing["status"],
             payload: %{
-              previous_codex_thread_id: existing["codex_thread_id"],
-              codex_thread_id: codex_thread_id
+              previous_remote_thread_id: existing["remote_thread_id"],
+              remote_thread_id: remote_thread_id,
+              agent_harness: agent_harness || existing["agent_harness"]
             }
           },
           db: db
@@ -416,6 +426,12 @@ defmodule Avcs.Threads do
       approval_policy: thread["default_approval_policy"],
       sandbox_mode: thread["default_sandbox_mode"]
     }
+  end
+
+  defp remote_thread_binding_changed?(existing, remote_thread_id, agent_harness) do
+    existing["remote_thread_id"] != remote_thread_id or
+      (is_binary(agent_harness) and agent_harness != "" and
+         existing["agent_harness"] != agent_harness)
   end
 
   defp value(attrs, key) when is_map(attrs) do

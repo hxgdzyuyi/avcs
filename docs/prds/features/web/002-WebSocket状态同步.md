@@ -12,16 +12,18 @@ React 与 Elixir 的应用状态同步主要通过 WebSocket / Channel 完成。
 运行时通信：
 
 ```text
-React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex app-server
+React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--Agent Harness-->  Codex app-server / Vercel AI Gateway
 ```
 
 职责：
 
-1. React 不直接调用 Codex app-server。
+1. React 不直接调用 Codex app-server、Vercel AI Gateway 或 OpenAI-compatible API。
 2. React 不直接读写全局 SQLite 或项目 SQLite。
 3. React 不直接读写本地文件系统。
 4. Elixir 负责校验事件、写库、管理项目文件夹、保存图片资产，并把状态变更推送给 React。
-5. Codex app-server 的输出由 Elixir 解析为 turn/item/asset 事件，再通过 WebSocket 推送给 React。
+5. Elixir 后端通过内部 Agent Harness 适配运行时。基础版 runtime 由全局设置 `agent.harness = codex | auto | avcs_agent` 决定，默认 `codex`，不在 `message:send` 等业务事件里暴露 per-turn harness 选择。
+6. 当前 harness 的输出由 Elixir 解析为 turn/item/asset 事件，再通过 WebSocket 推送给 React。
+7. AvcsAgent 的 pi-agent 风格工具名（`read`、`write`、`edit`、`bash`、`grep`、`find`、`ls`）只在 Phoenix 后端执行；React 不直接调用模型、SQLite、本地文件、Codex app-server、Vercel AI Gateway、OpenAI-compatible API 或 provider 脚本。
 
 ## 3. 客户端发送事件
 
@@ -33,7 +35,7 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 4. `thread:create`：新会话准备态发送第一条消息时创建 thread；点击铅笔入口不发送该事件。
 5. `thread:select`：切换当前 thread。
 6. `thread:items:list`：读取当前 thread 的聊天内容。
-7. `message:send`：发送用户消息和当前聊天输入区引用的 asset 列表，并触发 Elixir 通过 stdio 调用 Codex app-server；支持可选 `mask_edit` 元信息。
+7. `message:send`：发送用户消息和当前聊天输入区引用的 asset 列表，并触发 Elixir 经 Agent Harness 调用当前 runtime；支持可选 `mask_edit` 元信息。
 8. `message:edit_rerun`：编辑历史起始用户消息并从该点重跑；请求体为 `{ "item_id": "...", "content": "new text" }`。
 9. `assets:list`：读取资产列表。
 10. `assets:reference`：更新当前聊天输入区引用的图片资产。
@@ -42,10 +44,11 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 13. `board:item:move`：更新画板对象位置。
 14. `board:item:resize`：更新画板对象显示尺寸。
 15. `board:items:update`：批量更新多个 output board item 的位置、显示尺寸和层级，用于多选移动、对齐、统一尺寸、间距整理、右键层级调整以及前端 Undo / Redo 快照提交。
-16. `turn:stop`：停止当前 thread 的 active turn；queued turn 取消排队，已运行 turn 通过 Codex app-server `turn/interrupt` 中断。
+16. `turn:stop`：停止当前 thread 的 active turn；queued turn 取消排队，已运行 turn 经 Agent Harness 调用当前 runtime 的 interrupt 能力中断。
 17. `site_settings:get`：读取全局软件设置，payload 返回 `items` 和 `settings`。
 18. `site_settings:update`：更新全局软件设置，例如 `{ "ui.locale": "zh-hans" }`。
 19. `site_settings:reset`：重置全局软件设置 key，例如 `["ui.locale"]`。
+20. `avcs_agent:test`：使用已保存的 Vercel AI Gateway secret 和 AvcsAgent base URL 测试后端连接；响应不得包含明文 API key。
 
 ## 4. Phoenix HTTP API 对应动作
 
@@ -66,24 +69,27 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 3. `threads:updated`：thread 列表更新。
 4. `thread:items`：返回或刷新聊天内容。
 5. `agent:run_started`：Agent 开始运行。
-6. `agent:thinking_tick`：Codex app-server active turn 期间收到任意可识别事件或响应时推送，用于推进前端 thinking 点阵；payload 只包含 `thread_id`、`turn_id`、`event_name` 和 `status` 等轻量字段。
+6. `agent:thinking_tick`：active turn 期间收到任意可识别 harness 事件或响应时推送，用于推进前端 thinking 点阵；payload 只包含 `thread_id`、`turn_id`、`event_name` 和 `status` 等轻量字段。
 7. `assistant:delta`：Agent 文本流式输出片段。
 8. `item:created`：新增 turn/item。
 9. `item:updated`：已有 item 内容、payload 或状态更新，例如历史编辑后的用户消息。
-10. `tool:updated`：工具调用状态更新。
+10. `tool:updated`：工具调用状态更新。AvcsAgent 工具名可能是 `image_gen`、`read`、`ls`、`find`、`grep`、`bash`、显式开启的 `write` / `edit`，但 payload 仍是 Avcs 业务 item，不暴露任意 shell / FS 能力。
 11. `asset:created`：新增图片资产。
 12. `assets:updated`：资产列表更新。
 13. `board:item:created`：新增画板对象。
 14. `board:item:updated`：画板对象位置、尺寸或层级更新。
 15. `board:items`：批量变更量较大时刷新当前画板对象列表。
 16. `asset:referenced`：图片资产被加入当前聊天输入引用。
-17. `agent:run_completed`：Agent 运行完成，`status` 可以是 `completed`、`failed` 或 `interrupted`。
-18. `site_settings:updated`：全局软件设置更新或重置后的全量广播。
-19. `error`：可恢复错误或失败状态。
+17. `agent:state_snapshot`：AvcsAgent runtime 状态快照，payload 包含 `phase`、`is_streaming`、current assistant item、pending tool calls、error、active tool、pending steer 和 queued turn input。
+18. `agent:run_completed`：Agent 运行完成，`status` 可以是 `completed`、`failed` 或 `interrupted`。
+19. `site_settings:updated`：全局软件设置更新或重置后的全量广播。
+20. `error`：可恢复错误或失败状态。
 
 `project:rename` 成功后必须广播 `projects:updated`；如果重命名的是当前项目，还必须广播 `project:updated`。前端收到后更新左栏项目列表和当前项目显示名，不重新打开项目文件夹。
 
 `site_settings:get`、`site_settings:update`、`site_settings:reset` 的成功响应使用现有统一信封，`data.settings` 至少包含 `ui.locale`。`ui.locale` 默认 `en`，允许 `en` 和 `zh-hans`；前端收到 `site_settings:updated` 后应立即用最新语言设置重渲染高频静态文案，不刷新页面。
+
+Secret setting 不在 `data.settings` 或 `data.items[].value` 中返回明文。`providers.vercel_ai_gateway.api_key` 只返回 `is_secret: true`、`has_value`、`masked_value` 和更新时间等 public metadata；保存或重置后仍广播全量 `site_settings:updated`，但广播内容也不得包含明文 key。`avcs_agent:test` 只能返回连接状态、base URL 和模型摘要，不返回 key。
 
 `board:items:update` 成功后，服务端对每个更新对象广播 `board:item:updated`，前端按 id 合并；一次批量操作超过 50 个对象时可额外广播 `board:items` 全量列表。
 
@@ -92,6 +98,10 @@ React 前端  <--WebSocket/HTTP API-->  Elixir/Phoenix  <--stdio JSONL-->  Codex
 `message:send.mask_edit` 校验成功后，服务端应把 `asset_ids` 规范为 `[base_asset_id, mask_asset_id]`，并把 `mask_edit` 写入 user message payload；校验失败返回 `invalid_mask_edit`。
 
 `message:edit_rerun` 成功后返回更新后的 `item`、锚点 `turn`、`invalidated_turn_ids` 和 `invalidated_item_ids`，并广播 `item:updated`、`thread:items` 和 `turn:started`。失败错误码包括 `item_not_found`、`message_edit_unsupported`、`message_edit_conflict`、`empty_message` 和 `message_edit_rerun_failed`。旧路径只是退出当前有效列表，文件系统和 `assets` 行不因该事件删除。
+
+WebSocket 事件和 payload 不随 Agent Harness 改变。Harness-specific id、item、approval 和 trace 解析由后端 runtime 适配层处理；前端仍只消费 Avcs 的 thread/turn/item/asset/board 业务事件。
+
+AvcsAgent 的受控工具失败会作为普通 tool result / `tool:updated` 同步。未启用工具返回 `status=failed`、`error.code=tool_not_allowed`；路径越界、`.avcs/`、SQLite、secret-like 文件、二进制/过大文件或 symlink escape 等权限失败由后端转换为用户可见错误，不把敏感内容、远端 raw body、大段二进制或 API key 写入 WebSocket payload。
 
 ## 6. 状态与错误
 

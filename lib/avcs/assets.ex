@@ -4,6 +4,7 @@ defmodule Avcs.Assets do
   alias Avcs.Storage.SQLite
 
   @image_extensions ~w(.png .jpg .jpeg .gif .webp)
+  @png_signature <<0x89, "PNG", 13, 10, 26, 10>>
   @asset_delete_command "rm"
   @board_initial_x 72.0
   @board_initial_y 72.0
@@ -27,6 +28,10 @@ defmodule Avcs.Assets do
     SQLite.with_db(Avcs.Projects.project_db_path(project), fn db ->
       SQLite.one!(db, "SELECT * FROM assets WHERE hash = ? LIMIT 1", [hash])
     end)
+  end
+
+  def output_board_item(project, asset_id) when is_binary(asset_id) do
+    output_board_item_for_asset(project, asset_id)
   end
 
   def resolve_reference_paths(project, asset_ids) when is_list(asset_ids) do
@@ -672,11 +677,46 @@ defmodule Avcs.Assets do
 
   defp ensure_png_file(path) do
     case File.read(path) do
-      {:ok, <<0x89, "PNG", 13, 10, 26, 10, _rest::binary>>} -> :ok
-      {:ok, _binary} -> {:error, "Mask must be a PNG image"}
-      {:error, reason} -> {:error, "Cannot read mask image: #{inspect(reason)}"}
+      {:ok, @png_signature <> _rest = bytes} ->
+        if png_has_alpha_channel?(bytes) do
+          :ok
+        else
+          {:error, "Mask PNG must include an alpha channel"}
+        end
+
+      {:ok, _binary} ->
+        {:error, "Mask must be a PNG image"}
+
+      {:error, reason} ->
+        {:error, "Cannot read mask image: #{inspect(reason)}"}
     end
   end
+
+  defp png_has_alpha_channel?(@png_signature <> rest) do
+    case png_ihdr_color_type(rest) do
+      color_type when color_type in [4, 6] -> true
+      _color_type -> png_has_trns_chunk?(rest)
+    end
+  end
+
+  defp png_has_alpha_channel?(_bytes), do: false
+
+  defp png_ihdr_color_type(
+         <<0, 0, 0, 13, "IHDR", _width::32, _height::32, _bit_depth, color_type, _compression,
+           _filter, _interlace, _crc::32, _rest::binary>>
+       ) do
+    color_type
+  end
+
+  defp png_ihdr_color_type(_bytes), do: nil
+
+  defp png_has_trns_chunk?(
+         <<length::32, type::binary-size(4), _data::binary-size(length), _crc::32, rest::binary>>
+       ) do
+    type == "tRNS" or (type != "IEND" and png_has_trns_chunk?(rest))
+  end
+
+  defp png_has_trns_chunk?(_bytes), do: false
 
   defp require_dimensions(path) do
     case dimensions(path) do

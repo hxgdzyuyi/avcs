@@ -17,6 +17,8 @@ defmodule Avcs.Turns do
              , turns.approval_policy AS turn_approval_policy
              , turns.sandbox_mode AS turn_sandbox_mode
              , turns.data_provider AS turn_data_provider
+             , turns.agent_harness AS turn_agent_harness
+             , turns.remote_model AS turn_remote_model
              , turns.created_at AS turn_created_at, turns.updated_at AS turn_updated_at
              , turns.completed_at AS turn_completed_at, turns.error AS turn_error
         FROM items
@@ -52,6 +54,8 @@ defmodule Avcs.Turns do
         item_id = Ecto.UUID.generate()
 
         model = attr(opts, :model)
+        agent_harness = attr(opts, :agent_harness)
+        remote_model = attr(opts, :remote_model)
         effort = attr(opts, :effort)
         approval_policy = attr(opts, :approval_policy) || "never"
         sandbox_mode = attr(opts, :sandbox_mode) || "workspace-write"
@@ -67,14 +71,16 @@ defmodule Avcs.Turns do
           db,
           """
           INSERT INTO turns (
-            id, thread_id, status, user_text, model, effort, approval_policy,
-            sandbox_mode, data_provider, created_at, updated_at
+            id, thread_id, agent_harness, remote_model, status, user_text, model,
+            effort, approval_policy, sandbox_mode, data_provider, created_at, updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           """,
           [
             turn_id,
             thread_id,
+            agent_harness,
+            remote_model,
             status,
             text,
             model,
@@ -130,6 +136,8 @@ defmodule Avcs.Turns do
               effort: effort,
               approval_policy: approval_policy,
               sandbox_mode: sandbox_mode,
+              agent_harness: agent_harness,
+              remote_model: remote_model,
               data_provider: data_provider
             }
           },
@@ -208,7 +216,8 @@ defmodule Avcs.Turns do
       type = attr(attrs, :type)
       thread_id = attr(attrs, :thread_id)
       turn_id = attr(attrs, :turn_id)
-      codex_item_id = attr(attrs, :codex_item_id)
+      remote_item_id = attr(attrs, :remote_item_id)
+      tool_name = attr(attrs, :tool_name)
       role = attr(attrs, :role)
       content = attr(attrs, :content)
       status = attr(attrs, :status) || "completed"
@@ -218,16 +227,17 @@ defmodule Avcs.Turns do
         db,
         """
         INSERT INTO items (
-          id, turn_id, thread_id, codex_item_id, type, role, content, payload,
+          id, turn_id, thread_id, remote_item_id, tool_name, type, role, content, payload,
           status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
           id,
           turn_id,
           thread_id,
-          codex_item_id,
+          remote_item_id,
+          tool_name,
           type,
           role,
           content,
@@ -248,7 +258,8 @@ defmodule Avcs.Turns do
           thread_id: thread_id,
           turn_id: turn_id,
           item_id: id,
-          codex_item_id: codex_item_id,
+          remote_item_id: remote_item_id,
+          tool_name: tool_name,
           status: status,
           payload: %{current: item_trace_snapshot(item)}
         },
@@ -259,13 +270,14 @@ defmodule Avcs.Turns do
     end)
   end
 
-  def upsert_codex_item(project, attrs) do
+  def upsert_remote_item(project, attrs) do
     with_project_db(project, fn db ->
       SQLite.transaction!(db, fn ->
         now = Avcs.Time.now_iso()
         thread_id = attr(attrs, :thread_id)
         turn_id = attr(attrs, :turn_id)
-        codex_item_id = attr(attrs, :codex_item_id)
+        remote_item_id = attr(attrs, :remote_item_id)
+        tool_name = attr(attrs, :tool_name)
         type = attr(attrs, :type)
         role = attr(attrs, :role)
         content = attr(attrs, :content)
@@ -273,15 +285,15 @@ defmodule Avcs.Turns do
         payload = attr(attrs, :payload) || %{}
 
         existing =
-          if codex_item_id do
+          if remote_item_id do
             SQLite.one!(
               db,
               """
               SELECT * FROM items
-              WHERE thread_id = ? AND turn_id = ? AND codex_item_id = ?
+              WHERE thread_id = ? AND turn_id = ? AND remote_item_id = ?
               LIMIT 1
               """,
-              [thread_id, turn_id, codex_item_id]
+              [thread_id, turn_id, remote_item_id]
             )
           end
 
@@ -292,10 +304,11 @@ defmodule Avcs.Turns do
             db,
             """
             UPDATE items
-            SET type = ?, role = ?, content = ?, payload = ?, status = ?, updated_at = ?
+            SET type = ?, role = ?, content = ?, payload = ?, status = ?,
+                tool_name = COALESCE(?, tool_name), updated_at = ?
             WHERE id = ?
             """,
-            [type, role, content, Jason.encode!(payload), status, now, existing["id"]]
+            [type, role, content, Jason.encode!(payload), status, tool_name, now, existing["id"]]
           )
 
           item =
@@ -309,7 +322,8 @@ defmodule Avcs.Turns do
               thread_id: thread_id,
               turn_id: turn_id,
               item_id: existing["id"],
-              codex_item_id: codex_item_id,
+              remote_item_id: remote_item_id,
+              tool_name: tool_name,
               status: status,
               payload: %{
                 previous: item_trace_snapshot(previous),
@@ -327,16 +341,17 @@ defmodule Avcs.Turns do
             db,
             """
             INSERT INTO items (
-              id, turn_id, thread_id, codex_item_id, type, role, content, payload,
+              id, turn_id, thread_id, remote_item_id, tool_name, type, role, content, payload,
               status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
               id,
               turn_id,
               thread_id,
-              codex_item_id,
+              remote_item_id,
+              tool_name,
               type,
               role,
               content,
@@ -357,7 +372,8 @@ defmodule Avcs.Turns do
               thread_id: thread_id,
               turn_id: turn_id,
               item_id: id,
-              codex_item_id: codex_item_id,
+              remote_item_id: remote_item_id,
+              tool_name: tool_name,
               status: status,
               payload: %{current: item_trace_snapshot(item)}
             },
@@ -378,7 +394,7 @@ defmodule Avcs.Turns do
              SELECT * FROM items
              WHERE thread_id = ?
                AND turn_id = ?
-               AND codex_item_id = ?
+               AND remote_item_id = ?
                AND type = 'approval_request'
              LIMIT 1
              """,
@@ -442,7 +458,7 @@ defmodule Avcs.Turns do
                    thread_id: item["thread_id"],
                    turn_id: item["turn_id"],
                    item_id: id,
-                   codex_item_id: item["codex_item_id"],
+                   remote_item_id: item["remote_item_id"],
                    status: item["status"],
                    payload: %{
                      previous: item_trace_snapshot(existing),
@@ -462,12 +478,12 @@ defmodule Avcs.Turns do
     end
   end
 
-  def complete_turn(project, turn_id, codex_turn_id \\ nil) do
-    update_turn_status(project, turn_id, "completed", codex_turn_id, nil)
+  def complete_turn(project, turn_id, remote_turn_id \\ nil, opts \\ []) do
+    update_turn_status(project, turn_id, "completed", remote_turn_id, nil, opts)
   end
 
-  def interrupt_turn(project, turn_id, codex_turn_id \\ nil, reason \\ "Stopped by user") do
-    update_turn_status(project, turn_id, "interrupted", codex_turn_id, reason)
+  def interrupt_turn(project, turn_id, remote_turn_id \\ nil, reason \\ "Stopped by user") do
+    update_turn_status(project, turn_id, "interrupted", remote_turn_id, reason)
   end
 
   def fail_turn(project, turn_id, reason) do
@@ -483,7 +499,7 @@ defmodule Avcs.Turns do
     end
   end
 
-  def update_turn_status(project, turn_id, status, codex_turn_id, error \\ nil) do
+  def update_turn_status(project, turn_id, status, remote_turn_id, error \\ nil, opts \\ []) do
     case with_project_db(project, fn db ->
            SQLite.transaction!(db, fn ->
              existing = SQLite.one!(db, "SELECT * FROM turns WHERE id = ? LIMIT 1", [turn_id])
@@ -493,24 +509,37 @@ defmodule Avcs.Turns do
              else
                now = Avcs.Time.now_iso()
                completed_at = if status in ["completed", "failed", "interrupted"], do: now
+               agent_harness = attr(opts, :agent_harness)
+               remote_model = attr(opts, :remote_model)
 
                SQLite.run!(
                  db,
                  """
                  UPDATE turns
                  SET status = ?,
-                     codex_turn_id = COALESCE(?, codex_turn_id),
+                     agent_harness = COALESCE(?, agent_harness),
+                     remote_turn_id = COALESCE(?, remote_turn_id),
+                     remote_model = COALESCE(?, remote_model),
                      completed_at = COALESCE(?, completed_at),
                      error = COALESCE(?, error),
                      updated_at = ?
                  WHERE id = ?
                  """,
-                 [status, codex_turn_id, completed_at, error, now, turn_id]
+                 [
+                   status,
+                   agent_harness,
+                   remote_turn_id,
+                   remote_model,
+                   completed_at,
+                   error,
+                   now,
+                   turn_id
+                 ]
                )
 
                turn = decode_turn(SQLite.one!(db, "SELECT * FROM turns WHERE id = ?", [turn_id]))
 
-               if trace_turn_update?(existing, turn, status, codex_turn_id, error) do
+               if trace_turn_update?(existing, turn, status, remote_turn_id, error) do
                  Avcs.Trace.append_event(
                    project,
                    %{
@@ -518,13 +547,15 @@ defmodule Avcs.Turns do
                      event_name: turn_event_name(existing, turn),
                      thread_id: turn["thread_id"],
                      turn_id: turn_id,
-                     codex_turn_id: turn["codex_turn_id"],
+                     agent_harness: turn["agent_harness"],
+                     model: turn["remote_model"],
+                     remote_turn_id: turn["remote_turn_id"],
                      status: turn["status"],
                      payload: %{
                        from_status: existing && existing["status"],
                        to_status: turn["status"],
-                       previous_codex_turn_id: existing && existing["codex_turn_id"],
-                       codex_turn_id: turn["codex_turn_id"],
+                       previous_remote_turn_id: existing && existing["remote_turn_id"],
+                       remote_turn_id: turn["remote_turn_id"],
                        error: error
                      }
                    },
@@ -752,7 +783,8 @@ defmodule Avcs.Turns do
       UPDATE turns
       SET status = ?,
           user_text = ?,
-          codex_turn_id = NULL,
+          remote_turn_id = NULL,
+          remote_model = NULL,
           completed_at = NULL,
           error = NULL,
           updated_at = ?
@@ -876,8 +908,10 @@ defmodule Avcs.Turns do
       approval_policy: turn["approval_policy"] || "never",
       data_provider: turn["data_provider"],
       effort: turn["effort"],
+      agent_harness: turn["agent_harness"],
       mask_edit: payload["mask_edit"] || payload[:mask_edit],
       model: turn["model"],
+      remote_model: turn["remote_model"],
       sandbox_mode: turn["sandbox_mode"] || "workspace-write"
     }
   end
@@ -1223,6 +1257,8 @@ defmodule Avcs.Turns do
            , turns.approval_policy AS turn_approval_policy
            , turns.sandbox_mode AS turn_sandbox_mode
            , turns.data_provider AS turn_data_provider
+           , turns.agent_harness AS turn_agent_harness
+           , turns.remote_model AS turn_remote_model
            , turns.created_at AS turn_created_at, turns.updated_at AS turn_updated_at
            , turns.completed_at AS turn_completed_at, turns.error AS turn_error
       FROM items
@@ -1339,7 +1375,8 @@ defmodule Avcs.Turns do
       id: item["id"],
       turn_id: item["turn_id"],
       thread_id: item["thread_id"],
-      codex_item_id: item["codex_item_id"],
+      remote_item_id: item["remote_item_id"],
+      tool_name: item["tool_name"],
       type: item["type"],
       role: item["role"],
       status: item["status"],
@@ -1369,12 +1406,12 @@ defmodule Avcs.Turns do
 
   defp payload_keys(_payload), do: []
 
-  defp trace_turn_update?(nil, _turn, _status, _codex_turn_id, _error), do: false
+  defp trace_turn_update?(nil, _turn, _status, _remote_turn_id, _error), do: false
 
-  defp trace_turn_update?(existing, turn, _status, codex_turn_id, error) do
+  defp trace_turn_update?(existing, turn, _status, remote_turn_id, error) do
     existing["status"] != turn["status"] or
-      (is_binary(codex_turn_id) and codex_turn_id != "" and
-         existing["codex_turn_id"] != turn["codex_turn_id"]) or
+      (is_binary(remote_turn_id) and remote_turn_id != "" and
+         existing["remote_turn_id"] != turn["remote_turn_id"]) or
       not is_nil(error)
   end
 

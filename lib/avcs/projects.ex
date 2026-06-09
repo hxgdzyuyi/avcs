@@ -5,7 +5,7 @@ defmodule Avcs.Projects do
 
   alias Avcs.Storage.SQLite
 
-  @schema_version "5"
+  @schema_version "6"
   @project_sqlite_optimized_meta_key "project_sqlite_optimized_at"
   @project_sqlite_row_tables ~w(threads turns items assets board_items asset_links trace_events)
 
@@ -390,10 +390,9 @@ defmodule Avcs.Projects do
     folder = folder_path(project) |> Path.expand()
     expanded = Path.expand(path)
 
-    if inside?(expanded, folder) do
-      {:ok, Path.relative_to(expanded, folder)}
-    else
-      {:error, :outside_project}
+    case relative_inside(expanded, folder) do
+      {:ok, relative_path} -> {:ok, relative_path}
+      :error -> {:error, :outside_project}
     end
   end
 
@@ -411,7 +410,65 @@ defmodule Avcs.Projects do
   def inside?(path, root) do
     path = Path.expand(path)
     root = Path.expand(root)
+
+    match?({:ok, _relative_path}, relative_inside(path, root))
+  end
+
+  defp relative_inside(path, root) do
+    root
+    |> path_boundary_variants()
+    |> Enum.find_value(fn root_variant ->
+      path
+      |> path_boundary_variants()
+      |> Enum.find_value(fn path_variant ->
+        if literal_inside?(path_variant, root_variant) do
+          {:ok, Path.relative_to(path_variant, root_variant)}
+        end
+      end)
+    end)
+    |> case do
+      {:ok, relative_path} -> {:ok, relative_path}
+      nil -> :error
+    end
+  end
+
+  defp literal_inside?(path, root) do
     path == root or String.starts_with?(path, root <> "/")
+  end
+
+  defp path_boundary_variants(path) do
+    path = Path.expand(path)
+
+    [path | macos_private_alias_variants(path)]
+    |> Enum.uniq()
+  end
+
+  defp macos_private_alias_variants(path) do
+    if match?({:unix, :darwin}, :os.type()) do
+      [
+        {"/private/var", "/var"},
+        {"/private/tmp", "/tmp"},
+        {"/private/etc", "/etc"}
+      ]
+      |> Enum.flat_map(fn {private_path, public_path} ->
+        cond do
+          private_alias_match?(path, private_path) ->
+            [String.replace_prefix(path, private_path, public_path)]
+
+          private_alias_match?(path, public_path) ->
+            [String.replace_prefix(path, public_path, private_path)]
+
+          true ->
+            []
+        end
+      end)
+    else
+      []
+    end
+  end
+
+  defp private_alias_match?(path, alias_root) do
+    path == alias_root or String.starts_with?(path, alias_root <> "/")
   end
 
   def broadcast_projects_updated do
@@ -897,6 +954,34 @@ defmodule Avcs.Projects do
     end
   end
 
+  defp rename_column_if_needed(db, table, old_column, new_column) do
+    columns = SQLite.all!(db, "PRAGMA table_info(#{table})")
+    old_exists? = Enum.any?(columns, &(&1["name"] == old_column))
+    new_exists? = Enum.any?(columns, &(&1["name"] == new_column))
+
+    cond do
+      old_exists? and not new_exists? ->
+        SQLite.exec!(db, "ALTER TABLE #{table} RENAME COLUMN #{old_column} TO #{new_column}")
+
+      old_exists? and new_exists? ->
+        SQLite.run!(
+          db,
+          "UPDATE #{table} SET #{new_column} = COALESCE(#{new_column}, #{old_column})"
+        )
+
+        drop_column_if_supported(db, table, old_column)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp drop_column_if_supported(db, table, column) do
+    SQLite.exec!(db, "ALTER TABLE #{table} DROP COLUMN #{column}")
+  rescue
+    RuntimeError -> :ok
+  end
+
   defp normalize_project_path(raw_path) do
     path =
       raw_path
@@ -1040,7 +1125,8 @@ defmodule Avcs.Projects do
       CREATE TABLE IF NOT EXISTS threads (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
-        codex_thread_id TEXT,
+        agent_harness TEXT,
+        remote_thread_id TEXT,
         status TEXT NOT NULL DEFAULT 'idle',
         default_model TEXT,
         default_effort TEXT,
@@ -1055,7 +1141,9 @@ defmodule Avcs.Projects do
       CREATE TABLE IF NOT EXISTS turns (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL,
-        codex_turn_id TEXT,
+        agent_harness TEXT,
+        remote_turn_id TEXT,
+        remote_model TEXT,
         status TEXT NOT NULL,
         user_text TEXT,
         model TEXT,
@@ -1076,7 +1164,8 @@ defmodule Avcs.Projects do
         id TEXT PRIMARY KEY,
         turn_id TEXT,
         thread_id TEXT NOT NULL,
-        codex_item_id TEXT,
+        remote_item_id TEXT,
+        tool_name TEXT,
         type TEXT NOT NULL,
         role TEXT,
         content TEXT,
@@ -1149,9 +1238,12 @@ defmodule Avcs.Projects do
         thread_id TEXT NOT NULL,
         turn_id TEXT,
         item_id TEXT,
-        codex_thread_id TEXT,
-        codex_turn_id TEXT,
-        codex_item_id TEXT,
+        agent_harness TEXT,
+        provider TEXT,
+        model TEXT,
+        remote_thread_id TEXT,
+        remote_turn_id TEXT,
+        remote_item_id TEXT,
         status TEXT,
         payload TEXT,
         raw TEXT,
@@ -1177,10 +1269,22 @@ defmodule Avcs.Projects do
         ON trace_events(thread_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_trace_events_turn_id
         ON trace_events(turn_id, created_at);
-      CREATE INDEX IF NOT EXISTS idx_trace_events_codex_item_id
-        ON trace_events(codex_item_id, created_at);
       """)
 
+      rename_column_if_needed(db, "threads", "codex_thread_id", "remote_thread_id")
+      rename_column_if_needed(db, "turns", "codex_turn_id", "remote_turn_id")
+      rename_column_if_needed(db, "items", "codex_item_id", "remote_item_id")
+      rename_column_if_needed(db, "trace_events", "codex_thread_id", "remote_thread_id")
+      rename_column_if_needed(db, "trace_events", "codex_turn_id", "remote_turn_id")
+      rename_column_if_needed(db, "trace_events", "codex_item_id", "remote_item_id")
+
+      SQLite.exec!(db, """
+      DROP INDEX IF EXISTS idx_items_codex_item_id;
+      DROP INDEX IF EXISTS idx_trace_events_codex_item_id;
+      """)
+
+      ensure_column(db, "threads", "agent_harness", "TEXT")
+      ensure_column(db, "threads", "remote_thread_id", "TEXT")
       ensure_column(db, "threads", "status", "TEXT NOT NULL DEFAULT 'idle'")
       ensure_column(db, "threads", "default_model", "TEXT")
       ensure_column(db, "threads", "default_effort", "TEXT")
@@ -1196,6 +1300,9 @@ defmodule Avcs.Projects do
       ensure_column(db, "threads", "sidebar_order", "INTEGER NOT NULL DEFAULT 0")
       maybe_seed_thread_sidebar_order(db)
 
+      ensure_column(db, "turns", "agent_harness", "TEXT")
+      ensure_column(db, "turns", "remote_turn_id", "TEXT")
+      ensure_column(db, "turns", "remote_model", "TEXT")
       ensure_column(db, "turns", "model", "TEXT")
       ensure_column(db, "turns", "effort", "TEXT")
       ensure_column(db, "turns", "approval_policy", "TEXT")
@@ -1205,9 +1312,16 @@ defmodule Avcs.Projects do
       ensure_column(db, "turns", "error", "TEXT")
       ensure_column(db, "turns", "invalidated_at", "TEXT")
       ensure_column(db, "turns", "invalidated_by_item_id", "TEXT")
-      ensure_column(db, "items", "codex_item_id", "TEXT")
+      ensure_column(db, "items", "remote_item_id", "TEXT")
+      ensure_column(db, "items", "tool_name", "TEXT")
       ensure_column(db, "items", "invalidated_at", "TEXT")
       ensure_column(db, "items", "invalidated_by_item_id", "TEXT")
+      ensure_column(db, "trace_events", "agent_harness", "TEXT")
+      ensure_column(db, "trace_events", "provider", "TEXT")
+      ensure_column(db, "trace_events", "model", "TEXT")
+      ensure_column(db, "trace_events", "remote_thread_id", "TEXT")
+      ensure_column(db, "trace_events", "remote_turn_id", "TEXT")
+      ensure_column(db, "trace_events", "remote_item_id", "TEXT")
       ensure_column(db, "asset_links", "invalidated_at", "TEXT")
       ensure_column(db, "asset_links", "invalidated_by_item_id", "TEXT")
       ensure_column(db, "board_items", "invalidated_at", "TEXT")
@@ -1216,7 +1330,9 @@ defmodule Avcs.Projects do
       SQLite.exec!(
         db,
         """
-        CREATE INDEX IF NOT EXISTS idx_items_codex_item_id ON items(codex_item_id);
+        CREATE INDEX IF NOT EXISTS idx_items_remote_item_id ON items(remote_item_id);
+        CREATE INDEX IF NOT EXISTS idx_trace_events_remote_item_id
+          ON trace_events(remote_item_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_turns_invalidated
           ON turns(thread_id, invalidated_at);
         CREATE INDEX IF NOT EXISTS idx_items_invalidated

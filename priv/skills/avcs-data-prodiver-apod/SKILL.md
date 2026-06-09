@@ -22,29 +22,37 @@ description: 当用户提及 APOD 内容时，抓取 NASA Astronomy Picture of t
 ## 标准执行流程
 
 1. 识别用户意图为 APOD 任务。
-2. 调用脚本 `scripts/fetch_apod.py`。
-3. 读取 JSON 返回。
+2. 在 AvcsAgent 中调用受控 `bash` tool，而不是手动执行 shell 命令。
+3. 读取 `bash` tool result 中的 provider JSON 摘要。
 4. 若 `status == success`：
    - 使用 `image_path` 作为图片路径。
    - 使用 `title`、`date`、`explanation`、`copyright` 做基础文本说明。
 5. API 调用失败（含 key 失效/配额问题）时自动切换到网页抓取（`web_scrape`）。
 6. 将文件先存入 `work/`（临时），确认用途后再转入 `output/`。
 
-## 脚本调用
+## AvcsAgent 调用
 
-```bash
-cd <项目根目录>
-python priv/skills/avcs-data-prodiver-apod/scripts/fetch_apod.py \
-  --out-dir <输出目录> \
-  [--date YYYY-MM-DD] \
-  [--api-key <NASA_API_KEY>] \
-  [--prefer-hd]
+```json
+{
+  "command_kind": "data_provider",
+  "provider": "avcs-data-prodiver-apod",
+  "args": {
+    "date": "YYYY-MM-DD"
+  }
+}
 ```
 
 - `--date`：可选，ISO 日期（如 `2026-06-01`）。不传时使用 API 默认（通常是最新一条）。
-- `--api-key`：可选。未传时使用 `DEMO_KEY`。
-- `--out-dir`：可选，默认 `<当前工作目录>/work`（与 `thread-runtime-instructions.md` 的临时目录约定一致）。
-- `--prefer-hd`：可选，优先下载 `hdurl`（仅 API 路径）；网页抓取路径直接抓取页面主图。
+- `bash` tool 由 Phoenix 后端运行内置 `scripts/fetch_apod.py`，不是任意 shell。
+- `--out-dir` 由 Avcs 后端固定为当前项目 `work/`，模型不要自行传本地路径。
+- API key 不通过 tool arguments 传递；脚本默认使用 `DEMO_KEY`。
+- 默认下载 APOD 普通图片 URL；只有明确传入 `args.prefer_hd: true` 时才使用 `--prefer-hd`。
+
+底层脚本路径仅供审计和本地维护：
+
+```text
+priv/skills/avcs-data-prodiver-apod/scripts/fetch_apod.py
+```
 
 ## 返回 JSON 结构
 
@@ -108,5 +116,6 @@ python priv/skills/avcs-data-prodiver-apod/scripts/fetch_apod.py \
 
 - `media_type=video` 时返回元数据，不下载视频。
 - 网页抓取失败会回退失败；当 API 可用时仍优先使用 API 结果。
-- `DEMO_KEY` 是默认值，但可能受限于调用配额，频繁请求建议用户提供 `api_key`。
-- 不支持强行下载 `work/` 以外目录；如需交付，先落 `work/` 再移动到 `output/`。
+- `DEMO_KEY` 是默认值，可能受限于调用配额；不要把 API key 放入 tool arguments、日志、trace 或文档示例。
+- 不支持强行下载 `work/` 以外目录；AvcsAgent `bash` provider 只能把来源图片落入当前项目 `work/`，再由后续 `image_gen` 生成 `output/` 资产。
+- `bash` 是 Avcs 受控 provider 工具，不支持 `/bin/sh -c`、管道、重定向或任意命令字符串。

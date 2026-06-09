@@ -5,7 +5,9 @@
 
 ## 1. 目标
 
-Avcs 通过 `codex app-server` 调用 Codex Agent 能力，不在 Avcs 内部实现独立大模型服务、工具协议或复杂 Agent 编排。
+Avcs 通过 `codex app-server` 调用 Codex Agent 能力。本文只描述 Codex Harness，不描述 AvcsAgent；AvcsAgent 见 `docs/prds/features/agent/003-AvcsAgent调用.md`。
+
+后端通过内部 `Avcs.Agent.Harness` runtime boundary 调用 Agent。Codex Harness 隔离 Runner 与 Codex pool/client 协议细节，并把 Codex 远端 id 映射到 Avcs 的 `remote_*` 字段。
 
 ## 2. 调用方式
 
@@ -31,14 +33,16 @@ codex app-server
 3. 随后发送 `initialized` 通知。
 4. 使用 `thread/start` 创建 Codex 会话。
 5. 需要继续同一 Codex 会话时使用 `thread/resume`。
-6. 用户发送消息时，通过 `turn/start` 传入 `threadId`、用户文本、聊天输入区当前引用的图片路径、当前项目 `cwd` 和必要运行设置。
-7. 当前 thread 已有 active turn 且用户继续输入时，通过 `turn/steer` 把追加输入发送到 active turn，不创建新的 Avcs turn。
-8. 用户主动停止时，通过 `turn/interrupt` 发送 `threadId` 和 `turnId`；如果 Codex turn id 尚未返回，先记录 pending interrupt，拿到 id 后立即发送。
+6. 用户发送消息时，Runner 经 Codex Harness 调用 `turn/start`，传入 `threadId`、用户文本、聊天输入区当前引用的图片路径、当前项目 `cwd` 和必要运行设置。
+7. 当前 thread 已有 active turn 且用户继续输入时，Runner 经 Codex Harness 调用 `turn/steer` 把追加输入发送到 active turn，不创建新的 Avcs turn。
+8. 用户主动停止时，Runner 经 Codex Harness 调用 `turn/interrupt` 发送 `threadId` 和 `turnId`；如果 Codex turn id 尚未返回，先记录 pending interrupt，拿到 id 后立即发送。
 9. queued turn 尚未分配 app-server worker 时，直接取消队列并把本地 turn 标记为 `interrupted`。
-10. 用户编辑历史起始消息并重跑时，如本地 thread 已有 `codex_thread_id`，优先调用 `thread/fork` 创建新 Codex thread，再对新 thread 调用 `thread/rollback` 回到锚点前的 Codex 历史。
+10. 用户编辑历史起始消息并重跑时，如本地 thread 已有 `remote_thread_id` 且该 thread 使用 Codex Harness，Runner 请求 Codex Harness 准备重跑；Codex Harness 优先调用 `thread/fork` 创建新 Codex thread，再对新 thread 调用 `thread/rollback` 回到锚点前的 Codex 历史。
 11. `thread/rollback` 的 `numTurns` 由本地有效 turn 路径计算，包含被编辑的锚点 turn，保证后续 `turn/start` 使用编辑后的文本重新执行。
 12. 持续读取 `thread/*`、`turn/*`、`item/*`、工具进度和错误通知。
 13. 将 Codex 输出转换为 Avcs 自己的 turn/item/asset 记录。
+
+Codex app-server 子进程启动环境由 Codex Harness 统一组装。全局设置 `providers.vercel_ai_gateway.api_key` 存在时，后端把 Vercel AI Gateway key 注入 app-server env，并固定 OpenAI-compatible base URL 为 `https://ai-gateway.vercel.sh/v1`；该 key 不进入 RPC payload、trace raw、turn/item payload 或日志。用户保存或重置 provider key 后，app-server pool 立即淘汰 idle worker；active turn 不被强杀，但完成后不再复用旧 env。
 
 ## 4. 行为约束
 
@@ -51,7 +55,9 @@ codex app-server
 7. 当本轮包含 `mask_edit` 时，Avcs 传入原图和 mask 图两条引用，并在发送给 Codex 的文本中附加视觉参考指令：mask 白色或已标记区域表示需要编辑，黑色或未标记区域表示尽量保持不变。
 8. `mask_edit` 不等同正式图片编辑 API 的 mask 参数；Agent 只能按视觉参考能力执行。
 9. Codex `thread/rollback` 只影响 Codex 会话历史，不撤销 Avcs 项目文件夹中的 `work/`、`output/` 或 SQLite 记录；本地旧路径由 Avcs 自己用 invalidation 字段隐藏。
-10. 如果 `thread/fork` 或 `thread/rollback` 不可用，Avcs 可降级清空本地 `codex_thread_id` 并新开 Codex thread，但必须记录 trace，且 Agent 只能获得编辑后的当前 turn 上下文。
+10. 如果 `thread/fork` 或 `thread/rollback` 不可用，Avcs 可降级清空本地 `remote_thread_id` 并新开 Codex thread，但必须记录 trace，且 Agent 只能获得编辑后的当前 turn 上下文。
+11. Runner 不直接调用 `Avcs.Agent.CodexClient` 或 `Avcs.Agent.CodexAppServerPool`，只通过 `Avcs.Agent.HarnessRuntime` 调用当前 runtime。
+12. Codex item、Guardian approval 和 `codex_rpc` trace 仍按 Codex 语义解析；持久化远端 id 使用 provider-neutral `remote_*` 字段，不保留 `codex_*` 字段。
 
 ## 5. 事件映射
 
@@ -68,6 +74,8 @@ Codex app-server 输出需要映射到 Avcs：
 ## 6. 兼容性
 
 Codex app-server 当前属于实验性接口。Avcs 实现应显式记录兼容的 Codex CLI 版本，并在升级 Codex 时重新验证 JSON Schema 与事件映射。
+
+Codex app-server JSON Schema 校验、`codex_rpc` trace、stdio process lifecycle、pending steer / interrupt 和 approval response 逻辑归属 Codex Harness 内部。`trace_events.scope = "codex_rpc"` 只表示 Phoenix 与真实 Codex app-server 的 RPC 收发，不作为所有 harness 的通用 trace scope。trace 中应记录 `agent_harness = "codex"`，远端 id 写入 `remote_thread_id`、`remote_turn_id`、`remote_item_id`。
 
 Avcs 将 Codex app-server JSON Schema 作为 Elixir 后端协议契约提交到仓库：
 
@@ -113,3 +121,4 @@ Schema 只用于 Elixir 后端开发期和测试期协议校验，不暴露给 R
 7. Agent 输出能写回项目 SQLite 的 turn/item。
 8. Avcs 不在内部实现独立大模型服务或自定义工具协议。
 9. 历史消息编辑重跑时，后端能使用 `thread/fork` 和 `thread/rollback` 准备 Codex 历史，或在不可用时降级为新 Codex thread 并记录 trace。
+10. Runner 不直接引用 Codex client/pool，新增 fake harness 时只需实现 `Avcs.Agent.Harness` 的运行时函数。

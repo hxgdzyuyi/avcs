@@ -81,10 +81,11 @@ defmodule Avcs.Trace do
       db,
       """
       INSERT INTO trace_events (
-        id, scope, event_name, thread_id, turn_id, item_id, codex_thread_id,
-        codex_turn_id, codex_item_id, status, payload, raw, omitted, created_at
+        id, scope, event_name, thread_id, turn_id, item_id, agent_harness, provider,
+        model, remote_thread_id, remote_turn_id, remote_item_id, status, payload,
+        raw, omitted, created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       """,
       [
         id,
@@ -93,9 +94,12 @@ defmodule Avcs.Trace do
         attr(attrs, :thread_id),
         attr(attrs, :turn_id),
         attr(attrs, :item_id),
-        attr(attrs, :codex_thread_id),
-        attr(attrs, :codex_turn_id),
-        attr(attrs, :codex_item_id),
+        attr(attrs, :agent_harness),
+        attr(attrs, :provider),
+        attr(attrs, :model),
+        attr(attrs, :remote_thread_id),
+        attr(attrs, :remote_turn_id),
+        attr(attrs, :remote_item_id),
         attr(attrs, :status),
         Jason.encode!(payload),
         encode_nullable(raw),

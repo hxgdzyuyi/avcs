@@ -209,7 +209,7 @@ defmodule AvcsWeb.AssetControllerTest do
     project_dir: project_dir
   } do
     missing_path = Path.join([project_dir, "work", "missing.png"])
-    File.write!(missing_path, @png)
+    File.write!(missing_path, @png_alt)
     assert {:ok, missing_asset} = Avcs.Assets.upsert_asset(project, missing_path, source: "scan")
     File.rm!(missing_path)
 
@@ -221,7 +221,7 @@ defmodule AvcsWeb.AssetControllerTest do
            } = json_response(missing_conn, 404)
 
     mask_path = Path.join([project_dir, "work", "mask.png"])
-    File.write!(mask_path, @png_alt)
+    File.write!(mask_path, @png)
     assert {:ok, mask_asset} = Avcs.Assets.upsert_asset(project, mask_path, source: "mask")
 
     mask_conn = post(build_conn(), ~p"/api/assets/#{mask_asset["id"]}/copy_to_output", %{})
@@ -238,13 +238,13 @@ defmodule AvcsWeb.AssetControllerTest do
     project_dir: project_dir
   } do
     base_path = Path.join([project_dir, "output", "base.png"])
-    File.write!(base_path, @png)
+    File.write!(base_path, @png_alt)
     assert {:ok, base_asset} = Avcs.Assets.upsert_asset(project, base_path, source: "generated")
 
     upload_path =
       Path.join(System.tmp_dir!(), "avcs-mask-#{System.unique_integer([:positive])}.png")
 
-    File.write!(upload_path, @png_alt)
+    File.write!(upload_path, @png)
 
     conn =
       post(conn, ~p"/api/assets/mask", %{
@@ -265,6 +265,40 @@ defmodule AvcsWeb.AssetControllerTest do
     assert {:ok, [_base_board_item]} = Avcs.Board.list_items(project)
     assert {:ok, assets} = Avcs.Assets.list_assets(project)
     assert Enum.any?(assets, &(&1["id"] == mask_asset["id"]))
+
+    File.rm(upload_path)
+  end
+
+  test "mask upload rejects PNG files without an alpha channel", %{
+    conn: conn,
+    project: project,
+    project_dir: project_dir
+  } do
+    base_path = Path.join([project_dir, "output", "base.png"])
+    File.write!(base_path, @png_alt)
+    assert {:ok, base_asset} = Avcs.Assets.upsert_asset(project, base_path, source: "generated")
+
+    upload_path =
+      Path.join(System.tmp_dir!(), "avcs-mask-rgb-#{System.unique_integer([:positive])}.png")
+
+    File.write!(upload_path, @png_alt)
+
+    conn =
+      post(conn, ~p"/api/assets/mask", %{
+        "base_asset_id" => base_asset["id"],
+        "file" => %Plug.Upload{
+          path: upload_path,
+          filename: "mask.png",
+          content_type: "image/png"
+        }
+      })
+
+    assert %{
+             "success" => false,
+             "error" => %{"code" => "asset_mask_failed", "message" => message}
+           } = json_response(conn, 422)
+
+    assert message =~ "alpha channel"
 
     File.rm(upload_path)
   end

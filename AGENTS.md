@@ -2,7 +2,7 @@
 
 ## 产品定位
 
-Avcs 是 local-first 的 AI Visual Content Studio。MVP 是 Phoenix 承载的本地 Web 应用，用本地项目文件夹保存素材、输出和项目 SQLite，通过 Codex app-server 调用 Agent 能力。
+Avcs 是 local-first 的 AI Visual Content Studio。MVP 是 Phoenix 承载的本地 Web 应用，用本地项目文件夹保存素材、输出和项目 SQLite，通过后端 Agent Harness 调用 Agent 能力。Harness 可选择 Codex Agent 或 AvcsAgent。
 
 需求细节以 `docs/prds/overview.md` 和 `docs/prds/features/` 下的功能 PRD 为准；实现前如果发现本文与 PRD 冲突，优先更新本文或 PRD，避免让两个约定同时存在。
 
@@ -18,7 +18,7 @@ Avcs 是 local-first 的 AI Visual Content Studio。MVP 是 Phoenix 承载的本
 - 前端语言：纯 JavaScript，禁止 TypeScript
 - 前端样式：纯 Sass/SCSS，禁止 Tailwind、CSS-in-JS、Less 和组件库主题系统
 - 聊天输入：CodeMirror
-- Agent：`codex app-server`，默认 `stdio://` JSONL 通信
+- Agent：`auto | codex | avcs_agent` 双 harness；Codex 使用 `codex app-server` 的 `stdio://` JSONL，AvcsAgent 由 Phoenix 通过 Vercel AI Gateway OpenAI-compatible API 调用
 - 画板：普通 HTML DOM 元素自由布局，不使用 Canvas/WebGL/SVG 作为主渲染层
 
 ## 项目结构
@@ -32,7 +32,7 @@ lib/avcs/
   turns/        # turn 与 item 持久化
   assets/       # 图片 asset、hash 去重、导入、扫描、预览
   board/        # 画板对象位置、尺寸、层级
-  agent/        # Codex app-server 进程与协议封装
+  agent/        # Agent Harness、Codex app-server 协议封装、AvcsAgent client 和工具
 
 lib/avcs_web/
   controllers/  # Phoenix HTTP API
@@ -108,7 +108,7 @@ React 组件使用 `.jsx`，普通模块使用 `.js`。不要添加 `.ts`、`.ts
 
 - React 与 Elixir 的应用状态同步主要通过 WebSocket / Channel。
 - 本地文件夹打开、图片导入、聊天区上传、图片扫描、预览、打开所在文件夹、复制路径等文件操作通过 Phoenix HTTP API。
-- React 不直接调用 Codex app-server，不直接读写任何 SQLite，不直接拼接本地文件路径读取图片。
+- React 不直接调用 Codex app-server、Vercel AI Gateway、OpenAI-compatible API，不直接读写任何 SQLite，不直接拼接本地文件路径读取图片。
 - HTTP 除文件 API 外，还用于前端入口、静态资源和图片预览。
 
 ## Phoenix HTTP API 约定
@@ -148,9 +148,29 @@ React 组件使用 `.jsx`，普通模块使用 `.js`。不要添加 `.ts`、`.ts
 
 服务端推送事件用于同步状态变化，例如 `asset:created`、`assets:updated`、`board:item:created`、`board:item:updated`、`agent:run_started`、`agent:run_completed`、`error`。
 
-## Codex app-server
+## Agent Harness
 
-Agent 调用通过 `codex app-server` 封装，不在 Avcs 内部实现独立大模型服务或自定义工具协议。
+Agent 调用通过 `Avcs.Agent.HarnessRuntime` 统一选择实际 harness，Runner 不直接调用具体 client。
+
+全局设置：
+
+```text
+agent.harness = codex
+agent.avcs_agent.base_url = https://ai-gateway.vercel.sh/v1
+agent.avcs_agent.text_model = deepseek/deepseek-v4-pro
+agent.avcs_agent.image_model = openai/gpt-image-2
+agent.avcs_agent.max_tool_steps = 3
+agent.avcs_agent.compact_threshold = 0.75
+```
+
+- 默认使用 `codex`。用户可切换到 `auto`，此时优先 Codex；Codex 不可用且 AvcsAgent 已配置时使用 AvcsAgent。
+- `/web/settings` 可以全局切换 `auto | codex | avcs_agent`。
+- Vercel AI Gateway API key 只能通过 settings / secrets 读取，不硬编码、不打印、不写入文档、fixture、项目 SQLite、trace raw、日志或 WebSocket payload。
+- thread、turn、item 和 trace 中远端 id 统一使用 `remote_*` 字段，并记录实际 `agent_harness`。
+
+## Codex Agent / Codex app-server
+
+Codex Agent 调用通过 `codex app-server` 封装。Codex Harness 使用 Codex app-server 的官方协议，不在 Avcs 内部复刻 Codex 工具协议。
 
 实现要点：
 
@@ -163,6 +183,20 @@ Agent 调用通过 `codex app-server` 封装，不在 Avcs 内部实现独立大
 7. `priv/codex_app_server/schema_manifest.json` 记录生成时的 Codex CLI 版本、命令、schema draft 和生成时间。
 8. dev/test 运行时可以校验关键 request/response/notification，失败记录 warning 后继续兼容解析；prod 默认不因 schema 校验失败中断流程。
 9. Codex app-server 是实验性接口，升级 Codex CLI 后必须重新生成 schema、检查 diff，并更新事件映射测试。
+10. Codex Agent 的图片生成使用 Codex built-in `image_gen`；该 built-in 工具不属于 AvcsAgent。
+
+## AvcsAgent
+
+AvcsAgent 是用户没有 Codex 时的基础 harness。Phoenix 后端通过 Vercel AI Gateway 调用文本模型和图片模型，不让 React 直接调用远端模型服务。
+
+实现要点：
+
+1. 使用 OpenAI-compatible `/chat/completions` SSE streaming，把文本增量映射为 `assistant:delta`。
+2. loop 为 `build_context -> call_model -> stream_delta -> handle_tool_calls -> append_tool_results -> maybe_compact -> finish_or_repeat`。
+3. 基础版默认 active tools 为 `image_gen`、`read`、`ls`、`find`、`grep`、`bash`；`write`、`edit` 仅显式开启。所有工具都由 Avcs-native Elixir/Phoenix 后端受控白名单实现；不提供 MCP、浏览器、任意 shell、任意文件系统、subagent 或多 agent 工作流。Avcs 后端 `image_gen` tool 支持文生图、参考图、PNG mask edit，以及 `size`、`quality`、`output_format`、`output_compression`、`background`、`moderation` 等常用 OpenAI Image API 选项。
+4. `image_gen` 调用 `agent.avcs_agent.image_model`，无参考图和 mask 时走 Vercel AI Gateway OpenAI-compatible `/images/generations`。有参考图或 mask 时，默认 Vercel AI Gateway 走 `/chat/completions`，使用 `modalities: ["image"]` 和 data URL `image_url` 传入项目图片；非 Vercel OpenAI-compatible base URL 可走 `/images/edits` multipart `image[]` / `mask`。mask 必须是当前项目内带 alpha 通道的 PNG，并与第一张参考图尺寸一致。base64 解码后写入当前项目 `output/`，再走现有 hash 去重、asset、chat item 和 board item 入库流程。`gpt-image-2` 不支持 transparent background；正式 variation 和流式 partial images 暂不实现。
+5. running 中 steer 基础版不支持，返回 `steer_unsupported` 并保留草稿；Stop 中断当前 HTTP stream / Task 后把 turn 收敛为 `interrupted`。
+6. 超过 `agent.avcs_agent.compact_threshold` 时做简单上下文压缩；SQLite 历史不删除。
 
 ## 画板约定
 
@@ -178,7 +212,8 @@ Agent 调用通过 `codex app-server` 封装，不在 Avcs 内部实现独立大
 ## 常见错误
 
 - 不要把项目业务数据写入 `~/.avcs/avcs.sqlite3`；全局 SQLite 只保存软件级元数据和项目关联信息。
-- 不要让 React 绕过 Phoenix 直接访问 SQLite、Codex app-server 或本地文件。
+- 不要让 React 绕过 Phoenix 直接访问 SQLite、Codex app-server、Vercel AI Gateway、OpenAI-compatible API 或本地文件。
 - 不要在 React 项目中引入 TypeScript、Tailwind 或 CSS-in-JS。
 - 不要把生成图片保存到 `work/`；Agent 生成和加工结果应进入 `output/`。
+- 不要混淆图片工具：Codex Agent 用 Codex built-in `image_gen`；AvcsAgent 用 Avcs 后端 `image_gen` tool。
 - 不要用固定网格替代画板自由布局；画板图片应作为可移动、可缩放的 DOM 对象存在。

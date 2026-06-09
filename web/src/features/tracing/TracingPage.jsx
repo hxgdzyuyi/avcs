@@ -677,7 +677,7 @@ function TurnDetail({ turn, selectedItemId }) {
                 </header>
                 <dl>
                   <DetailField label="ID" value={item.id} />
-                  <DetailField label="Codex Item" value={item.codex_item_id} />
+                  <DetailField label="Codex Item" value={item.remote_item_id} />
                   <DetailField label="Created" value={formatTime(item.created_at)} />
                   <DetailField label="Updated" value={formatTime(item.updated_at)} />
                 </dl>
@@ -784,9 +784,9 @@ function EventDetail({ event }) {
         <Fact label="Turn ID" value={event.turn_id} />
         <Fact label="Item ID" value={event.item_id} />
         <Fact label="Created" value={formatTime(event.created_at)} />
-        <Fact label="Codex Thread" value={event.codex_thread_id} />
-        <Fact label="Codex Turn" value={event.codex_turn_id} />
-        <Fact label="Codex Item" value={event.codex_item_id} />
+        <Fact label="Codex Thread" value={event.remote_thread_id} />
+        <Fact label="Codex Turn" value={event.remote_turn_id} />
+        <Fact label="Codex Item" value={event.remote_item_id} />
       </section>
 
       <section className="tracing-section">
@@ -827,8 +827,8 @@ function EventTimeline({ title, events = [], emptyLabel, compact = false }) {
               </header>
               <dl>
                 <DetailField label="ID" value={event.id} />
-                <DetailField label="Codex Item" value={event.codex_item_id} />
-                <DetailField label="Codex Turn" value={event.codex_turn_id} />
+                <DetailField label="Codex Item" value={event.remote_item_id} />
+                <DetailField label="Codex Turn" value={event.remote_turn_id} />
               </dl>
               {Array.isArray(event.omitted) && event.omitted.length > 0 ? (
                 <JsonBlock label={`Omitted (${event.omitted.length})`} value={event.omitted} />
@@ -1163,9 +1163,9 @@ function itemContentLanguage(item) {
     item.type || "",
     item.role || "",
     item.status || "",
-    item?.payload?.codex_item?.type || "",
-    item?.payload?.codex_item?.name || "",
-    item?.payload?.codex_item?.command_type || "",
+    item?.payload?.remote_item?.type || "",
+    item?.payload?.remote_item?.name || "",
+    item?.payload?.remote_item?.command_type || "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -1208,9 +1208,9 @@ function normalizeTraceEvents(events = []) {
         thread_id: stringField(event?.thread_id),
         turn_id: stringField(event?.turn_id),
         item_id: stringField(event?.item_id),
-        codex_thread_id: stringField(event?.codex_thread_id),
-        codex_turn_id: stringField(event?.codex_turn_id),
-        codex_item_id: stringField(event?.codex_item_id),
+        remote_thread_id: stringField(event?.remote_thread_id),
+        remote_turn_id: stringField(event?.remote_turn_id),
+        remote_item_id: stringField(event?.remote_item_id),
         status: stringField(event?.status),
         payload: typeof event?.payload === "undefined" ? {} : event.payload,
         raw: typeof event?.raw === "undefined" ? null : event.raw,
@@ -1265,7 +1265,7 @@ function groupTimelineEvents(events, threadId) {
 
     const group = groups.get(id);
     group.events.push(event);
-    group.status = event.status || group.status;
+    group.status = timelineGroupStatus(group.status, event);
     group.createdAt = earliestTime(group.createdAt, event.created_at);
   });
 
@@ -1305,7 +1305,7 @@ function timelineGroupMarkdown(group) {
       markdownTableCell(event.event_name),
       markdownTableCell(event.status),
       markdownTableCell(event.item_id),
-      markdownTableCell(event.codex_item_id),
+      markdownTableCell(event.remote_item_id),
     ].join(" | "),
   );
 
@@ -1320,8 +1320,8 @@ function timelineGroupMarkdown(group) {
     `- RPC ID: ${codexRpcPayloadValue(event, "rpc_id") || "-"}`,
     `- Status: ${event.status || "-"}`,
     `- Item ID: ${event.item_id || "-"}`,
-    `- Codex Turn ID: ${event.codex_turn_id || "-"}`,
-    `- Codex Item ID: ${event.codex_item_id || "-"}`,
+    `- Remote Turn ID: ${event.remote_turn_id || "-"}`,
+    `- Remote Item ID: ${event.remote_item_id || "-"}`,
     "",
     "```json",
     stringifyJson(publicEventRow(event)),
@@ -1343,7 +1343,7 @@ function timelineGroupMarkdown(group) {
     "",
     "## Timeline",
     "",
-    "# | Created | Scope | RPC Method | Direction | RPC ID | Event | Status | Item ID | Codex Item ID",
+    "# | Created | Scope | RPC Method | Direction | RPC ID | Event | Status | Item ID | Remote Item ID",
     "--- | --- | --- | --- | --- | --- | --- | --- | --- | ---",
     ...timelineRows,
     "",
@@ -1351,6 +1351,11 @@ function timelineGroupMarkdown(group) {
     "",
     ...eventRows,
   ].join("\n");
+}
+
+function timelineGroupStatus(currentStatus, event) {
+  if (event.scope === "turn" && event.status) return event.status;
+  return currentStatus || event.status || "";
 }
 
 function markdownTableCell(value) {
@@ -1384,9 +1389,9 @@ function traceEventSearchText(event) {
       event.thread_id,
       event.turn_id,
       event.item_id,
-      event.codex_thread_id,
-      event.codex_turn_id,
-      event.codex_item_id,
+      event.remote_thread_id,
+      event.remote_turn_id,
+      event.remote_item_id,
       event.status,
       stringifyJson(event.payload),
       stringifyJson(event.raw),
@@ -1553,12 +1558,12 @@ function isBlankValue(value) {
 }
 
 function aggregatedOutputForItem(item) {
-  const output = item?.payload?.codex_item?.aggregatedOutput;
+  const output = item?.payload?.remote_item?.aggregatedOutput;
   return typeof output === "string" && output.length > 0 ? output : "";
 }
 
 function commandActionsForItem(item) {
-  const actions = item?.payload?.codex_item?.commandActions;
+  const actions = item?.payload?.remote_item?.commandActions;
   if (!Array.isArray(actions)) return [];
 
   return actions.flatMap((action) => {

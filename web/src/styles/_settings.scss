@@ -156,6 +156,20 @@
   border-top: 1px solid $soft-line;
 }
 
+.settings-inline-test {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 14px;
+  color: $muted;
+  font-size: 13px;
+}
+
+.settings-inline-test .configured {
+  color: $ink;
+}
+
 .settings-row {
   display: grid;
   grid-template-columns: minmax(180px, 240px) minmax(220px, 1fr) auto;
@@ -221,6 +235,24 @@
 .settings-input:focus {
   outline: 2px solid $selection-weak;
   border-color: $selection;
+}
+
+.settings-secret-control {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.settings-secret-control span {
+  overflow: hidden;
+  color: $muted;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-secret-control span.configured {
+  color: $ink;
 }
 
 .settings-toggle {

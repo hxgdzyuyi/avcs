@@ -31,8 +31,11 @@ defmodule AvcsWeb.AvcsChannel do
   end
 
   def handle_in("site_settings:update", payload, socket) do
-    case Avcs.SiteSettings.update_settings(payload["settings"] || %{}) do
+    settings = payload["settings"] || %{}
+
+    case Avcs.SiteSettings.update_settings(settings) do
       {:ok, data} ->
+        Avcs.Agent.ProviderSettings.notify_settings_changed(Map.keys(settings))
         Avcs.Events.broadcast("site_settings:updated", data)
         reply_ok(data, socket)
 
@@ -42,14 +45,27 @@ defmodule AvcsWeb.AvcsChannel do
   end
 
   def handle_in("site_settings:reset", payload, socket) do
-    case Avcs.SiteSettings.reset_settings(payload["keys"] || []) do
+    keys = payload["keys"] || []
+
+    case Avcs.SiteSettings.reset_settings(keys) do
       {:ok, data} ->
+        Avcs.Agent.ProviderSettings.notify_settings_changed(keys)
         Avcs.Events.broadcast("site_settings:updated", data)
         reply_ok(data, socket)
 
       {:error, reason} ->
         reply_site_settings_error(reason, socket)
     end
+  end
+
+  def handle_in("avcs_agent:test", _payload, socket) do
+    socket_ref = socket_ref(socket)
+
+    Task.Supervisor.start_child(Avcs.Agent.TaskSupervisor, fn ->
+      reply(socket_ref, avcs_agent_test_reply())
+    end)
+
+    {:noreply, socket}
   end
 
   def handle_in("project:select", %{"id" => id}, socket) do
@@ -337,10 +353,10 @@ defmodule AvcsWeb.AvcsChannel do
         {:error, :thread_not_found} ->
           reply_error("thread_not_found", "Thread was not found", socket)
 
-        {:error, :codex_thread_id_missing} ->
+        {:error, :remote_thread_id_missing} ->
           reply_error(
-            "thread_repair_missing_codex_thread",
-            "This thread has no Codex thread id to read from",
+            "thread_repair_missing_remote_thread",
+            "This thread has no remote thread id to read from",
             socket
           )
 
@@ -673,15 +689,28 @@ defmodule AvcsWeb.AvcsChannel do
   end
 
   defp models_list_reply do
-    codex_client = Application.get_env(:avcs, :codex_client, Avcs.Agent.CodexAppServerPool)
+    case Avcs.Agent.HarnessRuntime.list_models() do
+      {:ok, models} ->
+        {:ok, ok(%{items: models})}
 
-    if module_exports?(codex_client, :list_models, 0) do
-      case codex_client.list_models() do
-        {:ok, models} -> {:ok, ok(%{items: models})}
-        {:error, reason} -> {:ok, error("models_list_failed", to_string(reason))}
-      end
-    else
-      {:ok, ok(%{items: []})}
+      {:error, :models_list_unsupported} ->
+        {:ok, ok(%{items: []})}
+
+      {:error, reason} ->
+        {:ok, error("models_list_failed", to_string(reason))}
+    end
+  end
+
+  defp avcs_agent_test_reply do
+    case Avcs.Agent.AvcsAgentClient.test_connection() do
+      {:ok, result} ->
+        {:ok, ok(result)}
+
+      {:error, :avcs_agent_api_key_missing} ->
+        {:ok, error("avcs_agent_api_key_missing", "Vercel AI Gateway API key is not configured")}
+
+      {:error, reason} ->
+        {:ok, error("avcs_agent_test_failed", to_string(reason))}
     end
   end
 
@@ -741,7 +770,7 @@ defmodule AvcsWeb.AvcsChannel do
          "mode" => "visual_reference",
          "base_asset_id" => base_asset_id,
          "mask_asset_id" => mask_asset_id,
-         "mask_semantics" => "white_edit_black_keep"
+         "mask_semantics" => "transparent_edit_opaque_keep"
        }, [base_asset_id, mask_asset_id]}
     else
       {:error, message} -> {:error, "invalid_mask_edit", message}
@@ -933,7 +962,7 @@ defmodule AvcsWeb.AvcsChannel do
       thread_id: item["thread_id"],
       turn_id: item["turn_id"],
       item_id: item["id"],
-      codex_item_id: item["codex_item_id"],
+      remote_item_id: item["remote_item_id"],
       status: item["status"],
       payload: %{
         decision: decision,

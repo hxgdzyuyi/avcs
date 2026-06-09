@@ -94,7 +94,7 @@ defmodule Avcs.Agent.ApprovalReview do
     [
       turn_id: turn_id,
       thread_id: thread_id,
-      codex_item_id: review_id,
+      remote_item_id: review_id,
       type: "approval_request",
       role: "system",
       content: action_summary(params),

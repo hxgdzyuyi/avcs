@@ -315,7 +315,7 @@ def _build_summary(
     }
 
     if image_path is not None:
-        summary["image_path"] = str(image_path.resolve())
+        summary["image_path"] = str(image_path)
 
     return {k: v for k, v in summary.items() if v not in (None, [], {}, "")}
 
@@ -443,7 +443,9 @@ def main() -> int:
         )
         return 7
 
-    out_dir = Path(args.out_dir).expanduser().resolve()
+    out_dir = Path(args.out_dir).expanduser()
+    if not out_dir.is_absolute():
+        out_dir = Path.cwd() / out_dir
     image_path = _download_image(
         cover_url,
         out_dir,

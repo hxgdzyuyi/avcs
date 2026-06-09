@@ -379,7 +379,7 @@ async function exportMaskFile(canvas, fileName) {
     target.data[index] = value;
     target.data[index + 1] = value;
     target.data[index + 2] = value;
-    target.data[index + 3] = 255;
+    target.data[index + 3] = marked ? 0 : 255;
   }
 
   targetContext.putImageData(target, 0, 0);

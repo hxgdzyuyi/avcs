@@ -180,13 +180,17 @@ defmodule Avcs.ProjectsTest do
     global_db_path: global_db_path
   } do
     assert {:ok, "gpt-5.5"} = Avcs.SiteSettings.get_setting("agent.default_model")
+    assert {:ok, "codex"} = Avcs.SiteSettings.get_setting("agent.harness")
     assert {:ok, "medium"} = Avcs.SiteSettings.get_setting("agent.default_effort")
     assert {:ok, "en"} = Avcs.SiteSettings.get_setting("ui.locale")
+    assert {:ok, nil} = Avcs.SiteSettings.get_setting("providers.vercel_ai_gateway.api_key")
+    assert {:ok, nil} = Avcs.SiteSettings.secret_value("providers.vercel_ai_gateway.api_key")
 
     assert {:ok, data} =
              Avcs.SiteSettings.update_settings(%{
                "image.default_ratio" => "3:1",
                "image.default_count" => 3,
+               "providers.vercel_ai_gateway.api_key" => "vercel-secret-1234",
                "projects.default_root" => "~/Desktop/Avcs",
                "assets.scan_on_open" => true,
                "ui.locale" => "zh-hans"
@@ -194,6 +198,7 @@ defmodule Avcs.ProjectsTest do
 
     assert data.settings["image.default_ratio"] == "3:1"
     assert data.settings["image.default_count"] == 3
+    assert data.settings["providers.vercel_ai_gateway.api_key"] == nil
     assert data.settings["projects.default_root"] == Path.expand("~/Desktop/Avcs")
     assert data.settings["assets.scan_on_open"] == true
     assert data.settings["ui.locale"] == "zh-hans"
@@ -202,7 +207,18 @@ defmodule Avcs.ProjectsTest do
     assert item.is_default == false
     assert item.default_value == "auto"
 
+    assert secret_item = Enum.find(data.items, &(&1.key == "providers.vercel_ai_gateway.api_key"))
+    assert secret_item.value == nil
+    assert secret_item.is_secret == true
+    assert secret_item.has_value == true
+    assert secret_item.masked_value == "****1234"
+    assert secret_item.is_default == false
+
     assert {:ok, "3:1"} = Avcs.SiteSettings.get_setting("image.default_ratio")
+    assert {:ok, nil} = Avcs.SiteSettings.get_setting("providers.vercel_ai_gateway.api_key")
+
+    assert {:ok, "vercel-secret-1234"} =
+             Avcs.SiteSettings.secret_value("providers.vercel_ai_gateway.api_key")
 
     assert {:error, {:unknown_site_setting, "turns.default_model"}} =
              Avcs.SiteSettings.update_settings(%{"turns.default_model" => "gpt-5"})
@@ -213,8 +229,24 @@ defmodule Avcs.ProjectsTest do
     assert {:error, {:invalid_site_setting, "ui.locale"}} =
              Avcs.SiteSettings.update_settings(%{"ui.locale" => "fr"})
 
+    assert {:error, {:invalid_site_setting, "providers.vercel_ai_gateway.api_key"}} =
+             Avcs.SiteSettings.update_settings(%{"providers.vercel_ai_gateway.api_key" => ""})
+
     assert {:ok, reset} = Avcs.SiteSettings.reset_setting("image.default_ratio")
     assert reset.settings["image.default_ratio"] == "auto"
+
+    assert {:ok, reset_secret} =
+             Avcs.SiteSettings.reset_setting("providers.vercel_ai_gateway.api_key")
+
+    assert reset_secret.settings["providers.vercel_ai_gateway.api_key"] == nil
+
+    assert reset_secret.items
+           |> Enum.find(&(&1.key == "providers.vercel_ai_gateway.api_key"))
+           |> Map.take([:has_value, :masked_value, :is_default]) == %{
+             has_value: false,
+             masked_value: nil,
+             is_default: true
+           }
 
     assert {:ok, reset_locale} = Avcs.SiteSettings.reset_setting("ui.locale")
     assert reset_locale.settings["ui.locale"] == "en"
@@ -226,6 +258,10 @@ defmodule Avcs.ProjectsTest do
 
       assert SQLite.one!(db, "SELECT * FROM app_settings WHERE key = ?", [
                "image.default_count"
+             ])
+
+      refute SQLite.one!(db, "SELECT * FROM app_settings WHERE key = ?", [
+               "providers.vercel_ai_gateway.api_key"
              ])
     end)
   end
@@ -258,7 +294,7 @@ defmodule Avcs.ProjectsTest do
     assert info.file_mtime
     assert info.sqlite_info.page_size > 0
     assert info.sqlite_info.journal_mode in ["wal", "delete", "memory", "off"]
-    assert info.sqlite_info.schema_version == "5"
+    assert info.sqlite_info.schema_version == "6"
 
     assert %{rows: rows} = Enum.find(info.table_rows, &(&1.name == "threads"))
     assert rows >= 1
