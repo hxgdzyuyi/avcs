@@ -229,7 +229,7 @@ defmodule Avcs.Agent.AvcsAgentClient do
     end
   end
 
-  defp chat_completions_image_request?(settings, model, reference_images, mask_image, opts) do
+  defp chat_completions_image_request?(settings, model, _reference_images, _mask_image, opts) do
     case value(opts, :image_transport) do
       :chat_completions ->
         true
@@ -244,12 +244,10 @@ defmodule Avcs.Agent.AvcsAgentClient do
         false
 
       _transport ->
-        Avcs.Agent.ImageModelCapabilities.vercel_ai_gateway?(settings.base_url) and
-          image_input?(reference_images, mask_image) and
-          not Avcs.Agent.ImageModelCapabilities.vercel_image_api_only_model?(
-            settings.base_url,
-            model
-          )
+        Avcs.Agent.ImageModelCapabilities.vercel_chat_completions_image_model?(
+          settings.base_url,
+          model
+        )
     end
   end
 
@@ -258,21 +256,25 @@ defmodule Avcs.Agent.AvcsAgentClient do
       Avcs.Agent.ImageModelCapabilities.vercel_image_api_only_model?(settings.base_url, model)
   end
 
-  defp image_input?(reference_images, mask_image) do
-    reference_images != [] or not is_nil(mask_image)
-  end
-
   defp unsupported_chat_image_model_message(model) do
-    "Vercel AI Gateway treats #{model || "the configured image model"} as an Images API model, not a Chat Completions language model. Use /images/generations for text-only generation or choose a multimodal chat image model for reference images."
+    "Vercel AI Gateway treats #{model || "the configured image model"} as an Images API image-only model, not a Chat Completions multimodal image-output model. Use /images/generations for image-only models or choose a Gemini image model for Chat Completions image generation."
   end
 
   defp unsupported_reference_images_message(model) do
-    "Vercel AI Gateway does not support reference images for image-only model #{model || "the configured image model"} through the Chat Completions path. Use text-only generation with /images/generations or choose a multimodal chat image model for reference images."
+    "Vercel AI Gateway does not support reference images for image-only model #{model || "the configured image model"} through the Chat Completions image generation path. Use text-only generation with /images/generations or choose a Gemini image model for reference images."
   end
 
   defp chat_image_content(prompt, reference_images, mask_image, opts) do
     images = reference_images ++ List.wrap(mask_image || [])
 
+    if images == [] do
+      {:ok, image_prompt_with_options(prompt, opts)}
+    else
+      chat_structured_image_content(prompt, images, mask_image, opts)
+    end
+  end
+
+  defp chat_structured_image_content(prompt, images, mask_image, opts) do
     images
     |> Enum.reduce_while({:ok, [chat_text_part(prompt, mask_image, opts)]}, fn image,
                                                                                {:ok, parts} ->

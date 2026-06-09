@@ -708,7 +708,7 @@ defmodule Avcs.Agent.Tools.ImageGen do
   defp unsupported_reference_images_message(context) do
     model = value(context, :image_model) || "the configured image model"
 
-    "Vercel AI Gateway does not support reference images or mask edits for image-only model #{model}. Use text-only image generation or choose a multimodal chat image model for reference-based generation."
+    "Vercel AI Gateway does not support reference images or mask edits for image-only model #{model}. Use text-only image generation or choose a Gemini image model for reference-based generation."
   end
 
   defp avcs_agent_base_url(context) do

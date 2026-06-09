@@ -96,7 +96,7 @@ MVP 阶段明确不做以下能力：
 
 用户也可以在 Board 的 Work tab 中把 Work 图片拖到 Output tab 或 Output 画板区域。Avcs 通过 Phoenix API 把该图片复制到项目 `output/`，将 asset canonical 路径更新为 `output/...`，并创建或恢复对应画板对象；前端不直接复制本地文件。
 
-在 Board 预览 dialog 中，用户可以对当前图片临时涂抹 mask 区域并发送编辑描述。前端导出的 mask 是 alpha PNG：用户涂抹区域表示需要编辑，文件中对应区域使用透明 alpha，未涂抹区域保持不透明。Codex Agent 路径中，由于 Codex built-in `image_gen` 未暴露正式 mask 参数，Avcs 将原图与 mask 图一起作为视觉引用传给 Agent，并附加涂抹区域编辑、未涂抹区域尽量保持不变的指令。AvcsAgent 路径中，后端 `image_gen` 使用原图 `reference_asset_ids` 和 PNG `mask_asset_id`；默认 Vercel AI Gateway 下，`openai/gpt-image-*` 等 image-only 模型仅走 `/images/generations` 文生图，Google Gemini 等多模态图片模型可通过 `/chat/completions` + `modalities: ["image"]` 发送图片输入，非 Vercel OpenAI-compatible base URL 可通过 `/images/edits` multipart `image[]` / `mask` 调用图片模型；正式 variation 和 streaming partial images 留给后续迭代。
+在 Board 预览 dialog 中，用户可以对当前图片临时涂抹 mask 区域并发送编辑描述。前端导出的 mask 是 alpha PNG：用户涂抹区域表示需要编辑，文件中对应区域使用透明 alpha，未涂抹区域保持不透明。Codex Agent 路径中，由于 Codex built-in `image_gen` 未暴露正式 mask 参数，Avcs 将原图与 mask 图一起作为视觉引用传给 Agent，并附加涂抹区域编辑、未涂抹区域尽量保持不变的指令。AvcsAgent 路径中，后端 `image_gen` 使用原图 `reference_asset_ids` 和 PNG `mask_asset_id`；默认 Vercel AI Gateway 下，`openai/gpt-image-*`、DALL-E、Imagen、Flux 和 Grok image 等 image-only 模型仅走 `/images/generations` 文生图，Google Gemini image 等多模态图片输出模型按 Vercel 文档通过 `/chat/completions` + `modalities: ["image"]` 生成图片，并可发送图片输入，非 Vercel OpenAI-compatible base URL 可通过 `/images/edits` multipart `image[]` / `mask` 调用图片模型；正式 variation 和 streaming partial images 留给后续迭代。
 
 ### 6.4 管理 thread 与资产
 

@@ -193,13 +193,14 @@ AvcsAgent compaction：
 
 行为：
 
-1. 没有参考图和 mask 时调用 Vercel AI Gateway `/images/generations`，模型默认 `openai/gpt-image-2`。
-2. 存在 `reference_asset_ids` 或 `mask_asset_id` 时解析当前项目 asset。默认 Vercel AI Gateway 下，`openai/gpt-image-*` 等 image-only 模型不走 `/chat/completions` 参考图路径；Google Gemini 等多模态图片模型通过 `/chat/completions`、`modalities: ["image"]` 和 data URL `image_url` 传入参考图/带 alpha 通道的 PNG mask；非 Vercel OpenAI-compatible base URL 可通过 `/images/edits` multipart `image[]` / `mask` 传入。
-3. base64 解码后写入项目 `output/`。
-4. 复用现有 hash 去重、asset、asset link、board item 和 WebSocket 更新。
-5. `size`、`quality`、`output_format`、`output_compression`、`background`、`moderation` 透传给图片接口；`aspect_ratio` 可映射为常用 `size`。
-6. tool result 只返回 asset id、相对路径、尺寸、hash、mime type、reference_count、mask_asset_id、request 摘要和短状态。
-7. `gpt-image-2` 不支持原生透明背景，`background: "transparent"` 前置返回 unsupported；正式 variation 和 streaming partial images 留给后续计划。
+1. Vercel AI Gateway 下，`openai/gpt-image-*`、DALL-E、Imagen、Flux 和 Grok image 等 image-only 模型使用 OpenAI-compatible `/images/generations` 文生图，模型默认 `openai/gpt-image-2`。
+2. Vercel AI Gateway 下，Google Gemini image 等多模态图片输出模型按 Vercel 文档通过 `/chat/completions`、`modalities: ["image"]` 生成图片；有 `reference_asset_ids` 或 `mask_asset_id` 时解析当前项目 asset，并用 data URL `image_url` 传入参考图/带 alpha 通道的 PNG mask。
+3. 非 Vercel OpenAI-compatible base URL 下，参考图和 mask 可通过 `/images/edits` multipart `image[]` / `mask` 传入。
+4. base64 解码后写入项目 `output/`。
+5. 复用现有 hash 去重、asset、asset link、board item 和 WebSocket 更新。
+6. `size`、`quality`、`output_format`、`output_compression`、`background`、`moderation` 透传给图片接口；`aspect_ratio` 可映射为常用 `size`。
+7. tool result 只返回 asset id、相对路径、尺寸、hash、mime type、reference_count、mask_asset_id、request 摘要和短状态。
+8. `gpt-image-2` 不支持原生透明背景，`background: "transparent"` 前置返回 unsupported；正式 variation 和 streaming partial images 留给后续计划。
 
 ## pi-agent 风格受控工具
 

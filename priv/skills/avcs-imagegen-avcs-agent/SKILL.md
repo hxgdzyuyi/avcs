@@ -13,7 +13,7 @@ description: AvcsAgent 在 Avcs 项目中生成或编辑光栅图片资产时使
 - 不要调用 Codex built-in `image_gen`、CLI、SDK、OpenAI API、自定义脚本生成器或其它模型调用路径。
 - AvcsAgent `image_gen` 支持文生图；仅当当前图片模型传输方式支持参考图时，才通过 `reference_asset_ids` 把当前项目图片 asset 作为视觉参考输入。
 - AvcsAgent `image_gen` 在当前图片模型传输方式支持参考图时，支持通过 `mask_asset_id` 对第一张参考图执行 PNG mask edit；mask 必须是当前项目内带 alpha 通道的 PNG asset。
-- 默认 Vercel AI Gateway 下，`openai/gpt-image-*` 是 Images API image-only 模型，走 `/images/generations` 文生图，不走 `/chat/completions` 参考图；Google Gemini 等多模态图片模型才通过 `/chat/completions`、`modalities: ["image"]` 和 data URL image input 发送参考图。
+- 默认 Vercel AI Gateway 下，`openai/gpt-image-*`、DALL-E、Imagen、Flux 和 Grok image 等 image-only 模型走 `/images/generations` 文生图，不走 `/chat/completions` 参考图；Google Gemini image 等多模态图片输出模型按 Vercel 文档走 `/chat/completions`、`modalities: ["image"]`，有参考图时再用 data URL `image_url` 发送项目图片。
 - 非 Vercel OpenAI-compatible base URL 下，参考图和 mask 可走 OpenAI Images API `/images/edits` multipart `image[]` / `mask`。
 - 如有 APOD 或其它 data provider 图片结果，当前图片模型支持参考图时把 provider 返回的图片 `asset_id` 放入 `reference_asset_ids`；当前模型只支持文生图时，把 provider 摘要写入 prompt 后不传参考图。
 - `gpt-image-2` 不支持 `background: "transparent"`；正式 variation 和 streaming partial images 暂不支持。

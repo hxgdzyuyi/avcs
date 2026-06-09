@@ -38,7 +38,7 @@ defmodule Avcs.Agent.AvcsAgentClientTest do
                  AvcsAgentClient.generate_image("Use the reference",
                    base_url: "http://127.0.0.1:#{server.port}/ai-gateway.vercel.sh/v1",
                    api_key: "test-key",
-                   image_model: "google/gemini-3-pro-image",
+                   image_model: "google/gemini-3.1-flash-image-preview",
                    reference_images: [
                      %{
                        asset_id: "asset-1",
@@ -61,7 +61,7 @@ defmodule Avcs.Agent.AvcsAgentClientTest do
         assert request.path == "/ai-gateway.vercel.sh/v1/chat/completions"
         assert request.multipart == []
 
-        assert request.json["model"] == "google/gemini-3-pro-image"
+        assert request.json["model"] == "google/gemini-3.1-flash-image-preview"
         assert request.json["modalities"] == ["image"]
         assert request.json["stream"] == false
         assert request.json["n"] == 1
@@ -81,6 +81,44 @@ defmodule Avcs.Agent.AvcsAgentClientTest do
         stop_http_server(server)
       end
     end)
+  end
+
+  test "sends Vercel text-only generation through chat completions for Gemini image models" do
+    response_body = chat_image_response("chat-image-generation-response")
+    server = start_http_server!(response_body)
+
+    try do
+      assert {:ok, result} =
+               AvcsAgentClient.generate_image("Generate a sunset image",
+                 base_url: "http://127.0.0.1:#{server.port}/ai-gateway.vercel.sh/v1",
+                 api_key: "test-key",
+                 image_model: "google/gemini-3.1-flash-image-preview",
+                 size: "1024x1536",
+                 quality: "high"
+               )
+
+      assert result.raw_id == "chat-image-generation-response"
+      assert [%{base64: base64, mime_type: "image/png"}] = result.images
+      assert Base.decode64!(base64) == @png
+
+      assert_receive {:http_request, request}, 1_000
+      assert request.method == "POST"
+      assert request.path == "/ai-gateway.vercel.sh/v1/chat/completions"
+      assert request.multipart == []
+
+      assert request.json["model"] == "google/gemini-3.1-flash-image-preview"
+      assert request.json["modalities"] == ["image"]
+      assert request.json["stream"] == false
+      assert request.json["n"] == 1
+
+      [%{"content" => content, "role" => "user"}] = request.json["messages"]
+      assert is_binary(content)
+      assert content =~ "Generate a sunset image"
+      assert content =~ "size: 1024x1536"
+      assert content =~ "quality: high"
+    after
+      stop_http_server(server)
+    end
   end
 
   test "rejects Vercel referenced images for image-only OpenAI image models" do
@@ -104,6 +142,37 @@ defmodule Avcs.Agent.AvcsAgentClientTest do
       assert message =~ "openai/gpt-image-2"
       assert message =~ "/images/generations"
     end)
+  end
+
+  test "sends Vercel text-only image generation through images endpoint for image-only models" do
+    response_body = image_api_response("vercel-image-only-generation-response")
+    server = start_http_server!(response_body)
+
+    try do
+      assert {:ok, result} =
+               AvcsAgentClient.generate_image("Draw a red balloon",
+                 base_url: "http://127.0.0.1:#{server.port}/ai-gateway.vercel.sh/v1",
+                 api_key: "test-key",
+                 image_model: "openai/gpt-image-2",
+                 size: "1024x1024",
+                 quality: "medium"
+               )
+
+      assert result.raw_id == "vercel-image-only-generation-response"
+
+      assert_receive {:http_request, request}, 1_000
+      assert request.method == "POST"
+      assert request.path == "/ai-gateway.vercel.sh/v1/images/generations"
+
+      assert request.json["model"] == "openai/gpt-image-2"
+      assert request.json["prompt"] == "Draw a red balloon"
+      assert request.json["n"] == 1
+      assert request.json["size"] == "1024x1024"
+      assert request.json["quality"] == "medium"
+      refute Map.has_key?(request.json, "response_format")
+    after
+      stop_http_server(server)
+    end
   end
 
   test "sends mask image through image edits transport" do

@@ -102,14 +102,15 @@ AvcsAgent 的 `image_gen` 是 Phoenix 后端工具，支持文生图、参考图
 
 行为：
 
-1. 没有 `reference_asset_ids` 和 `mask_asset_id` 时调用 Vercel AI Gateway OpenAI-compatible `/images/generations`，模型使用 `agent.avcs_agent.image_model`。
-2. 存在 `reference_asset_ids` 或 `mask_asset_id` 时，Phoenix 后端解析这些 asset 并读取当前项目内图片文件。默认 Vercel AI Gateway 下，`openai/gpt-image-*` 等 image-only 模型不走 `/chat/completions` 参考图路径；Google Gemini 等多模态图片模型通过 OpenAI-compatible `/chat/completions`、`modalities: ["image"]` 和 data URL `image_url` 把图片作为视觉参考或 mask edit 输入；非 Vercel OpenAI-compatible base URL 可通过 `/images/edits` multipart `image[]` / `mask` 发送。
-3. 图片响应使用 base64，后端解码并写入当前项目 `output/`。
-4. 写入后复用现有 hash 去重、asset、asset link、chat item、board item 和 WebSocket 更新流程。
-5. `size`、`quality`、`output_format`、`output_compression`、`background`、`moderation` 透传给图片接口；`aspect_ratio` 在未显式传 `size` 时映射为常用尺寸。
-6. `mask_asset_id` 必须是当前项目内 PNG asset，并要求同时提供至少一张参考图；mask 必须包含 alpha 通道，可读取尺寸时，mask 尺寸必须与第一张参考图一致。
-7. tool result 只返回 asset id、相对路径、尺寸、hash、MIME 类型、参考图数量、mask asset id、请求摘要和短状态，不返回 API key、远端原始响应、参考图二进制或大段二进制。
-8. `gpt-image-2` 不支持 `background: "transparent"`，后端前置返回 unsupported；正式 variation 和 streaming partial images 暂不实现。
+1. Vercel AI Gateway 下，`openai/gpt-image-*`、DALL-E、Imagen、Flux 和 Grok image 等 image-only 模型使用 OpenAI-compatible `/images/generations` 文生图，模型使用 `agent.avcs_agent.image_model`。
+2. Vercel AI Gateway 下，Google Gemini image 等多模态图片输出模型按 Vercel 文档通过 OpenAI-compatible `/chat/completions`、`modalities: ["image"]` 生成图片；存在 `reference_asset_ids` 或 `mask_asset_id` 时，Phoenix 后端解析这些 asset、读取当前项目内图片文件，并用 data URL `image_url` 把图片作为视觉参考或 mask edit 输入。
+3. 非 Vercel OpenAI-compatible base URL 可通过 `/images/edits` multipart `image[]` / `mask` 发送参考图和 mask。
+4. 图片响应使用 base64，后端解码并写入当前项目 `output/`。
+5. 写入后复用现有 hash 去重、asset、asset link、chat item、board item 和 WebSocket 更新流程。
+6. `size`、`quality`、`output_format`、`output_compression`、`background`、`moderation` 透传给图片接口；`aspect_ratio` 在未显式传 `size` 时映射为常用尺寸。
+7. `mask_asset_id` 必须是当前项目内 PNG asset，并要求同时提供至少一张参考图；mask 必须包含 alpha 通道，可读取尺寸时，mask 尺寸必须与第一张参考图一致。
+8. tool result 只返回 asset id、相对路径、尺寸、hash、MIME 类型、参考图数量、mask asset id、请求摘要和短状态，不返回 API key、远端原始响应、参考图二进制或大段二进制。
+9. `gpt-image-2` 不支持 `background: "transparent"`，后端前置返回 unsupported；正式 variation 和 streaming partial images 暂不实现。
 
 ## 6.1 pi-agent 风格受控工具
 

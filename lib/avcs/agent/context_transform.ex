@@ -93,7 +93,7 @@ defmodule Avcs.Agent.ContextTransform do
     - 当前 thread 中，图片生成只使用 Avcs 后端 `image_gen` tool。
     - AvcsAgent `image_gen` 支持文生图；仅当当前图片模型传输方式支持参考图时，才通过 `reference_asset_ids` 把当前项目图片资产作为视觉参考输入。
     - 当 data provider context 或 provider tool result 包含图片 `asset_id` 时，如果当前图片模型支持参考图则把该 id 放入 `reference_asset_ids`；如果当前模型只支持文生图，则把 provider 的标题、日期、说明、来源等摘要写入 prompt 后不传参考图。
-    - 默认 Vercel AI Gateway 下，`openai/gpt-image-*` 是 Images API image-only 模型，走 `/images/generations` 文生图，不走 `/chat/completions` 参考图；Google Gemini 等多模态图片模型才通过 `/chat/completions`、`modalities: ["image"]` 和 data URL image input 发送参考图；非 Vercel OpenAI-compatible base URL 可走 `/images/edits`。
+    - 默认 Vercel AI Gateway 下，`openai/gpt-image-*`、DALL-E、Imagen、Flux 和 Grok image 等 image-only 模型走 `/images/generations` 文生图，不走 `/chat/completions` 参考图；Google Gemini image 等多模态图片输出模型按 Vercel 文档走 `/chat/completions`、`modalities: ["image"]`，有参考图时再用 data URL `image_url` 发送项目图片；非 Vercel OpenAI-compatible base URL 可走 `/images/edits`。
     - AvcsAgent `image_gen` 支持常用 OpenAI Image API 选项：`size`、`quality`、`output_format`、`output_compression`、`background`、`moderation`。
     - AvcsAgent `image_gen` 支持通过 `mask_asset_id` 对第一张参考图执行 PNG mask 编辑；mask 必须是当前项目内带 alpha 通道的 PNG asset。
     - `gpt-image-2` 不支持 transparent background；正式 variation 仍返回 unsupported 或留给后续计划。
